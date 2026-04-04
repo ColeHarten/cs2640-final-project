@@ -29,7 +29,7 @@ rebuild: clean build
 docker: docker-build
 
 docker-build:
-	docker build --no-cache -t $(IMAGE) .
+	docker build --platform linux/amd64 -t $(IMAGE) .
 
 docker-run:
 	docker run --rm $(IMAGE)

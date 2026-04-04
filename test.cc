@@ -21,6 +21,10 @@ using asyncmux::TierRegistry;
 
 namespace {
 
+constexpr const char* kColorRed = "\x1b[31m";
+constexpr const char* kColorBoldGreen = "\x1b[1;32m";
+constexpr const char* kColorReset = "\x1b[0m";
+
 std::vector<Byte> to_bytes(const std::string& s) {
     std::vector<Byte> out;
     out.reserve(s.size());
@@ -43,7 +47,7 @@ void assert_eq(const std::string& actual,
                const std::string& expected,
                const std::string& message) {
     if (actual != expected) {
-        std::cerr << "FAIL: " << message << "\n"
+        std::cerr << kColorRed << "FAIL:" << kColorReset << " " << message << "\n"
                   << "  expected: [" << expected << "]\n"
                   << "  actual:   [" << actual << "]\n";
         std::abort();
@@ -52,7 +56,7 @@ void assert_eq(const std::string& actual,
 
 void assert_true(bool cond, const std::string& message) {
     if (!cond) {
-        std::cerr << "FAIL: " << message << "\n";
+        std::cerr << kColorRed << "FAIL:" << kColorReset << " " << message << "\n";
         std::abort();
     }
 }
@@ -176,6 +180,6 @@ int main() {
     test_missing_file_read_returns_empty();
     test_overwrite_appends_new_metadata_in_current_scaffold();
 
-    std::cout << "All AsyncMux scaffold tests passed.\n";
+    std::cout << kColorBoldGreen << "All AsyncMux scaffold tests passed." << kColorReset << "\n";
     return 0;
 }
