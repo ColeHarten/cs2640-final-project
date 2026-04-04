@@ -1,0 +1,6 @@
+build
+cmake-build-*
+.git
+.gitmodules
+.vscode
+.DS_Store
