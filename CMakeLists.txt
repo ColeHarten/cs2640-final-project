@@ -28,21 +28,30 @@ target_include_directories(cppcoro_static_thread_pool
 find_package(Threads REQUIRED)
 target_link_libraries(cppcoro_static_thread_pool PUBLIC Threads::Threads)
 
-add_executable(asyncmux_tests
-    test.cc
-    amux/asyncmux.cc
-    amux/tiers/memory_tier.cc
-    amux/tiers/disk_tier.cc
-)
+function(add_asyncmux_test target source_file)
+    add_executable(${target}
+        ${source_file}
+        amux/asyncmux.cc
+        amux/tiers/memory_tier.cc
+        amux/tiers/disk_tier.cc
+    )
 
-target_include_directories(asyncmux_tests
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-)
+    target_include_directories(${target}
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
 
-if(ENABLE_SANITIZERS)
-    target_compile_options(asyncmux_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(asyncmux_tests PRIVATE -fsanitize=address,undefined)
-endif()
+    if(ENABLE_SANITIZERS)
+        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endif()
 
-target_link_libraries(asyncmux_tests PRIVATE cppcoro_static_thread_pool)
+    target_link_libraries(${target} PRIVATE cppcoro_static_thread_pool)
+endfunction()
+
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cc)
+
+foreach(test_source ${TEST_SOURCES})
+    get_filename_component(test_target ${test_source} NAME_WE)
+    add_asyncmux_test(${test_target} ${test_source})
+endforeach()
