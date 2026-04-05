@@ -17,6 +17,8 @@ RUN apt-get update && apt-get install -y \
     tar \
     python3 \
     pkg-config \
+    e2fsprogs \
+    util-linux \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

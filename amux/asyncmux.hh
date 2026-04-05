@@ -27,7 +27,6 @@ using uint64_t = std::uint64_t;
 using BlockId = uint64_t;
 using TierId = std::uint32_t;
 
-
 static constexpr size_t kBlockSize = 4096;
 
 // Value type that owns a contiguous byte buffer for read and write results.
@@ -43,18 +42,15 @@ struct IoBuffer {
     const Byte* bytes() const;
 };
 
-// Describes where a file range is stored within a tier and block.
+// Describes where a logical file range currently lives.
 struct BlockLocation {
     BlockId block_id;
     TierId tier_id;
     uint64_t file_offset;
-    uint64_t block_offset;
     uint64_t size;
-    uint64_t segment_id;
-    uint64_t tier_offset;
 };
 
-// Write request payload describing a block that should be persisted.
+// Write request payload describing a logical chunk that should be persisted.
 struct WriteBlock {
     BlockId block_id;
     uint64_t file_offset;
@@ -67,7 +63,12 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-// Thread-safe metadata store that tracks which blocks belong to which file path.
+struct LocatedBlock {
+    std::string path;
+    BlockLocation location;
+};
+
+// Thread-safe metadata store that tracks which logical ranges belong to which file path.
 class MetadataStore {
 public:
     std::vector<BlockLocation> lookup(const std::string& path,
@@ -78,18 +79,13 @@ public:
                 BlockId block_id,
                 TierId tier_id,
                 uint64_t file_offset,
-                uint64_t size,
-                uint64_t segment_id,
-                uint64_t tier_offset);
+                uint64_t size);
 
     void update_block(BlockId block_id, TierId new_tier);
 
-    void relocate_block(BlockId block_id,
-                        TierId new_tier,
-                        uint64_t new_segment_id,
-                        uint64_t new_tier_offset);
+    void relocate_block(BlockId block_id, TierId new_tier);
 
-    BlockLocation get_block(BlockId block_id) const;
+    LocatedBlock get_block(BlockId block_id) const;
 
     TierId tier_of(BlockId block_id) const;
 
@@ -99,6 +95,7 @@ private:
 };
 
 // Storage-tier interface implemented by concrete backends.
+// This is now Mux-like: the lower tier exposes file-oriented offset I/O.
 class Tier {
 public:
     virtual ~Tier() = default;
@@ -106,110 +103,43 @@ public:
     virtual TierId id() const = 0;
     virtual std::string name() const = 0;
 
-    virtual cppcoro::task<IoBuffer> read_block(BlockId block_id,
-                                                              uint64_t offset,
-                                                              uint64_t size) = 0;
+    virtual cppcoro::task<IoBuffer> read_at(const std::string& relative_path,
+                                            uint64_t offset,
+                                            uint64_t size) = 0;
 
-    virtual cppcoro::task<void> write_block(BlockId block_id,
-                                                          uint64_t offset,
-                                            std::span<const Byte> data) = 0;
+    virtual cppcoro::task<void> write_at(const std::string& relative_path,
+                                         uint64_t offset,
+                                         std::span<const Byte> data) = 0;
 
-    virtual cppcoro::task<void> delete_block(BlockId block_id) = 0;
+    virtual cppcoro::task<void> remove_file(const std::string& relative_path) = 0;
 };
 
-class SegmentFileTier final : public Tier {
+// Mounted-filesystem-backed tier.
+// Files are rooted under root_dir and written at logical offsets, allowing the
+// underlying filesystem to manage allocation and sparse regions.
+class FileSystemTier final : public Tier {
 public:
-    SegmentFileTier(TierId id,
-                    std::string name,
-                    std::filesystem::path root_dir,
-                    cppcoro::static_thread_pool& pool,
-                    uint64_t segment_size = 64ull * 1024 * 1024);
+    FileSystemTier(TierId id,
+                   std::string name,
+                   std::filesystem::path root_dir,
+                   cppcoro::static_thread_pool& pool);
 
     TierId id() const override;
     std::string name() const override;
 
-    std::pair<uint64_t, uint64_t> allocate_extent(uint64_t size);
-
-    cppcoro::task<IoBuffer> read_extent(uint64_t segment_id,
-                                        uint64_t tier_offset,
-                                        uint64_t size);
-
-    cppcoro::task<void> write_extent(uint64_t segment_id,
-                                     uint64_t tier_offset,
-                                     std::span<const Byte> data);
-
-    cppcoro::task<IoBuffer> read_block(BlockId block_id,
-                                       uint64_t offset,
-                                       uint64_t size) override;
-
-    cppcoro::task<void> write_block(BlockId block_id,
+    cppcoro::task<IoBuffer> read_at(const std::string& relative_path,
                                     uint64_t offset,
-                                    std::span<const Byte> data) override;
+                                    uint64_t size) override;
 
-    cppcoro::task<void> delete_block(BlockId block_id) override;
+    cppcoro::task<void> write_at(const std::string& relative_path,
+                                 uint64_t offset,
+                                 std::span<const Byte> data) override;
 
-private:
-    std::filesystem::path segment_path(uint64_t segment_id) const;
-
-    TierId id_;
-    std::string name_;
-    std::filesystem::path root_dir_;
-    cppcoro::static_thread_pool& pool_;
-    std::mutex mu_;
-    uint64_t segment_size_;
-    uint64_t current_segment_id_ = 0;
-    uint64_t current_segment_offset_ = 0;
-};
-
-// In-memory storage-tier implementation derived from Tier.
-class MemoryTier final : public Tier {
-public:
-    MemoryTier(TierId id, std::string name, cppcoro::static_thread_pool& pool);
-
-    TierId id() const override;
-    std::string name() const override;
-
-    cppcoro::task<IoBuffer> read_block(BlockId block_id,
-                                                    uint64_t offset,
-                                                    uint64_t size) override;
-
-    cppcoro::task<void> write_block(BlockId block_id,
-                                                uint64_t offset,
-                                    std::span<const Byte> data) override;
-
-    cppcoro::task<void> delete_block(BlockId block_id) override;
+    cppcoro::task<void> remove_file(const std::string& relative_path) override;
 
 private:
-    TierId id_;
-    std::string name_;
-    cppcoro::static_thread_pool& pool_;
-    std::mutex mu_;
-    std::unordered_map<BlockId, std::vector<Byte>> blocks_;
-};
-
-// Disk-backed storage-tier implementation derived from Tier.
-class DiskTier final : public Tier {
-public:
-    DiskTier(TierId id,
-             std::string name,
-             std::filesystem::path root_dir,
-             cppcoro::static_thread_pool& pool);
-
-    TierId id() const override;
-    std::string name() const override;
-
-    cppcoro::task<IoBuffer> read_block(BlockId block_id,
-                                       uint64_t offset,
-                                       uint64_t size) override;
-
-    cppcoro::task<void> write_block(BlockId block_id,
-                                    uint64_t offset,
-                                    std::span<const Byte> data) override;
-
-    cppcoro::task<void> delete_block(BlockId block_id) override;
-
-private:
-    std::filesystem::path block_path(BlockId block_id) const;
+    std::filesystem::path full_path(const std::string& relative_path) const;
+    void ensure_parent_dirs(const std::filesystem::path& p) const;
 
     TierId id_;
     std::string name_;
@@ -222,9 +152,7 @@ private:
 class TierRegistry {
 public:
     void add(std::unique_ptr<Tier> tier);
-
     Tier& get(TierId id);
-
     const Tier& get(TierId id) const;
 
 private:
@@ -238,18 +166,17 @@ public:
     virtual TierId choose_tier(const WriteBlock& block) = 0;
 };
 
-// ConstantPlacementPolicy is a concrete PlacementPolicy that always chooses one tier.
+// ConstantPlacementPolicy always chooses one tier.
 class ConstantPlacementPolicy final : public PlacementPolicy {
 public:
     explicit ConstantPlacementPolicy(TierId default_tier);
-
     TierId choose_tier(const WriteBlock&) override;
 
 private:
     TierId default_tier_;
 };
 
-// Monotonic block-id allocator used by AsyncMux for new blocks.
+// Monotonic block-id allocator used by AsyncMux for new logical chunks.
 class BlockAllocator {
 public:
     BlockId next();
@@ -268,11 +195,11 @@ public:
              bool auto_migration_enabled = false);
 
     cppcoro::task<IoBuffer> read(const std::string& path,
-                                            uint64_t offset,
-                                            uint64_t size);
+                                 uint64_t offset,
+                                 uint64_t size);
 
     cppcoro::task<void> write(const std::string& path,
-                                        uint64_t offset,
+                              uint64_t offset,
                               std::span<const Byte> data);
 
     cppcoro::task<void> migrate(BlockId block_id, TierId src_id, TierId dst_id);
@@ -283,7 +210,7 @@ private:
     std::vector<WriteBlock> split(uint64_t offset, std::span<const Byte> data);
 
     IoBuffer assemble(const std::vector<BlockLocation>& locations,
-                      std::vector<IoBuffer> blocks,
+                      std::vector<IoBuffer> pieces,
                       uint64_t read_offset,
                       uint64_t read_size);
 
@@ -301,11 +228,11 @@ public:
     explicit FuseFrontend(AsyncMux& mux);
 
     cppcoro::task<IoBuffer> on_read(const std::string& path,
-                                                uint64_t offset,
-                                                uint64_t size);
+                                    uint64_t offset,
+                                    uint64_t size);
 
     cppcoro::task<void> on_write(const std::string& path,
-                                            uint64_t offset,
+                                 uint64_t offset,
                                  std::span<const Byte> data);
 
 private:
