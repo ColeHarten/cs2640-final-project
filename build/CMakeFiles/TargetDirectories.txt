@@ -1,0 +1,4 @@
+/Users/coleharten/cs2640-final-project/build/CMakeFiles/cppcoro_static_thread_pool.dir
+/Users/coleharten/cs2640-final-project/build/CMakeFiles/asyncmux_tests.dir
+/Users/coleharten/cs2640-final-project/build/CMakeFiles/edit_cache.dir
+/Users/coleharten/cs2640-final-project/build/CMakeFiles/rebuild_cache.dir

@@ -31,6 +31,8 @@ target_link_libraries(cppcoro_static_thread_pool PUBLIC Threads::Threads)
 add_executable(asyncmux_tests
     test.cc
     amux/asyncmux.cc
+    amux/tiers/memory_tier.cc
+    amux/tiers/disk_tier.cc
 )
 
 target_include_directories(asyncmux_tests

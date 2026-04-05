@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -122,6 +123,36 @@ private:
     cppcoro::static_thread_pool& pool_;
     std::mutex mu_;
     std::unordered_map<BlockId, std::vector<Byte>> blocks_;
+};
+
+class DiskTier final : public Tier {
+public:
+    DiskTier(TierId id,
+             std::string name,
+             std::filesystem::path root_dir,
+             cppcoro::static_thread_pool& pool);
+
+    TierId id() const override;
+    std::string name() const override;
+
+    cppcoro::task<IoBuffer> read_block(BlockId block_id,
+                                       uint64_t offset,
+                                       uint64_t size) override;
+
+    cppcoro::task<void> write_block(BlockId block_id,
+                                    uint64_t offset,
+                                    std::span<const Byte> data) override;
+
+    cppcoro::task<void> delete_block(BlockId block_id) override;
+
+private:
+    std::filesystem::path block_path(BlockId block_id) const;
+
+    TierId id_;
+    std::string name_;
+    std::filesystem::path root_dir_;
+    cppcoro::static_thread_pool& pool_;
+    std::mutex mu_;
 };
 
 class TierRegistry {
