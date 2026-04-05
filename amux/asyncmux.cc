@@ -154,8 +154,9 @@ BlockId BlockAllocator::next() {
 AsyncMux::AsyncMux(TierRegistry& tiers,
 				   MetadataStore& metadata,
 				   PlacementPolicy& placement,
-				   cppcoro::static_thread_pool& pool)
-	: tiers_(tiers), metadata_(metadata), placement_(placement), pool_(pool) {}
+				   cppcoro::static_thread_pool& pool,
+                   bool auto_migration_enabled)
+	: tiers_(tiers), metadata_(metadata), placement_(placement), pool_(pool), auto_migration_enabled_(auto_migration_enabled) {}
 
 // AsyncMux::read
 //         Reads file data by gathering and assembling mapped blocks.

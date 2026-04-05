@@ -196,7 +196,8 @@ public:
     AsyncMux(TierRegistry& tiers,
              MetadataStore& metadata,
              PlacementPolicy& placement,
-             cppcoro::static_thread_pool& pool);
+             cppcoro::static_thread_pool& pool,
+             bool auto_migration_enabled = false);
 
     cppcoro::task<IoBuffer> read(const std::string& path,
                                             uint64_t offset,
@@ -223,6 +224,7 @@ private:
     PlacementPolicy& placement_;
     cppcoro::static_thread_pool& pool_;
     BlockAllocator allocator_;
+    bool auto_migration_enabled_ = false;
 };
 
 class FuseFrontend {
