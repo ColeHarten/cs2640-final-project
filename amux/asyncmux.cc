@@ -2,24 +2,38 @@
 
 namespace asyncmux {
 
+// IoBuffer::IoBuffer
+//         Default-constructs an empty byte buffer.
 IoBuffer::IoBuffer() = default;
 
+// IoBuffer::IoBuffer
+//         Constructs a buffer pre-sized to n bytes.
 IoBuffer::IoBuffer(size_t n) : data(n) {}
 
+// IoBuffer::IoBuffer
+//         Takes ownership of an existing byte vector.
 IoBuffer::IoBuffer(std::vector<Byte> bytes) : data(std::move(bytes)) {}
 
+// IoBuffer::size
+//         Returns the number of bytes in the buffer.
 size_t IoBuffer::size() const {
 	return data.size();
 }
 
+// IoBuffer::bytes
+//         Returns a mutable pointer to the buffer data.
 Byte* IoBuffer::bytes() {
 	return data.data();
 }
 
+// IoBuffer::bytes
+//         Returns a const pointer to the buffer data.
 const Byte* IoBuffer::bytes() const {
 	return data.data();
 }
 
+// MetadataStore::lookup
+//         Finds block locations overlapping the requested file range.
 std::vector<BlockLocation> MetadataStore::lookup(const std::string& path,
 												 uint64_t offset,
 												 uint64_t size) const {
@@ -42,6 +56,8 @@ std::vector<BlockLocation> MetadataStore::lookup(const std::string& path,
 	return out;
 }
 
+// MetadataStore::update
+//         Inserts or refreshes metadata for a block at a file offset.
 void MetadataStore::update(const std::string& path,
 						   BlockId block_id,
 						   TierId tier_id,
@@ -63,6 +79,8 @@ void MetadataStore::update(const std::string& path,
 	}
 }
 
+// MetadataStore::update_block
+//         Moves a known block's metadata to a new tier id.
 void MetadataStore::update_block(BlockId block_id, TierId new_tier) {
 	std::unique_lock lock(mu_);
 	for (auto& [_, vec] : file_map_) {
@@ -75,6 +93,8 @@ void MetadataStore::update_block(BlockId block_id, TierId new_tier) {
 	}
 }
 
+// MetadataStore::tier_of
+//         Returns the current tier id for a specific block.
 TierId MetadataStore::tier_of(BlockId block_id) const {
 	std::shared_lock lock(mu_);
 	for (const auto& [_, vec] : file_map_) {
@@ -87,17 +107,25 @@ TierId MetadataStore::tier_of(BlockId block_id) const {
 	throw IoError("unknown block in tier_of()");
 }
 
+// MemoryTier::MemoryTier
+//         Creates an in-memory tier bound to a scheduler pool.
 MemoryTier::MemoryTier(TierId id, std::string name, cppcoro::static_thread_pool& pool)
 	: id_(id), name_(std::move(name)), pool_(pool) {}
 
+// MemoryTier::id
+//         Returns this tier's unique identifier.
 TierId MemoryTier::id() const {
 	return id_;
 }
 
+// MemoryTier::name
+//         Returns this tier's display name.
 std::string MemoryTier::name() const {
 	return name_;
 }
 
+// MemoryTier::read_block
+//         Reads a block slice from in-memory storage.
 cppcoro::task<IoBuffer> MemoryTier::read_block(BlockId block_id,
 										   uint64_t offset,
 										   uint64_t size) {
@@ -119,6 +147,8 @@ cppcoro::task<IoBuffer> MemoryTier::read_block(BlockId block_id,
 	co_return IoBuffer{std::move(out)};
 }
 
+// MemoryTier::write_block
+//         Writes bytes into a block at the requested offset.
 cppcoro::task<void> MemoryTier::write_block(BlockId block_id,
 											uint64_t offset,
 											std::span<const Byte> data) {
@@ -134,6 +164,8 @@ cppcoro::task<void> MemoryTier::write_block(BlockId block_id,
 	co_return;
 }
 
+// MemoryTier::delete_block
+//         Removes a block from in-memory storage.
 cppcoro::task<void> MemoryTier::delete_block(BlockId block_id) {
 	co_await pool_.schedule();
 
@@ -142,10 +174,14 @@ cppcoro::task<void> MemoryTier::delete_block(BlockId block_id) {
 	co_return;
 }
 
+// TierRegistry::add
+//         Registers a tier instance keyed by its id.
 void TierRegistry::add(std::unique_ptr<Tier> tier) {
 	tiers_.emplace(tier->id(), std::move(tier));
 }
 
+// TierRegistry::get
+//         Returns a mutable reference to a tier by id.
 Tier& TierRegistry::get(TierId id) {
 	auto it = tiers_.find(id);
 	if (it == tiers_.end()) {
@@ -154,6 +190,8 @@ Tier& TierRegistry::get(TierId id) {
 	return *it->second;
 }
 
+// TierRegistry::get
+//         Returns a const reference to a tier by id.
 const Tier& TierRegistry::get(TierId id) const {
 	auto it = tiers_.find(id);
 	if (it == tiers_.end()) {
@@ -162,22 +200,32 @@ const Tier& TierRegistry::get(TierId id) const {
 	return *it->second;
 }
 
+// SimplePlacementPolicy::SimplePlacementPolicy
+//         Sets the default tier used for new writes.
 SimplePlacementPolicy::SimplePlacementPolicy(TierId default_tier) : default_tier_(default_tier) {}
 
+// SimplePlacementPolicy::choose_tier
+//         Chooses the destination tier for a write block.
 TierId SimplePlacementPolicy::choose_tier(const WriteBlock&) {
 	return default_tier_;
 }
 
+// BlockAllocator::next
+//         Returns the next monotonically increasing block id.
 BlockId BlockAllocator::next() {
 	return next_id_++;
 }
 
+// AsyncMux::AsyncMux
+//         Constructs the multiplexer with shared service dependencies.
 AsyncMux::AsyncMux(TierRegistry& tiers,
 				   MetadataStore& metadata,
 				   PlacementPolicy& placement,
 				   cppcoro::static_thread_pool& pool)
 	: tiers_(tiers), metadata_(metadata), placement_(placement), pool_(pool) {}
 
+// AsyncMux::read
+//         Reads file data by gathering and assembling mapped blocks.
 cppcoro::task<IoBuffer> AsyncMux::read(const std::string& path,
 									   uint64_t offset,
 									   uint64_t size) {
@@ -194,6 +242,8 @@ cppcoro::task<IoBuffer> AsyncMux::read(const std::string& path,
 	co_return assemble(std::move(blocks), std::move(results), offset, size);
 }
 
+// AsyncMux::write
+//         Splits input data into blocks and writes them to tiers.
 cppcoro::task<void> AsyncMux::write(const std::string& path,
 									uint64_t offset,
 									std::span<const Byte> data) {
@@ -211,6 +261,8 @@ cppcoro::task<void> AsyncMux::write(const std::string& path,
 	}
 }
 
+// AsyncMux::migrate
+//         Copies a block from one tier to another and updates metadata.
 cppcoro::task<void> AsyncMux::migrate(BlockId block_id, TierId src_id, TierId dst_id) {
 	Tier& src = tiers_.get(src_id);
 	Tier& dst = tiers_.get(dst_id);
@@ -223,6 +275,8 @@ cppcoro::task<void> AsyncMux::migrate(BlockId block_id, TierId src_id, TierId ds
 	co_await src.delete_block(block_id);
 }
 
+// AsyncMux::promote
+//         Moves a block to a hotter tier when needed.
 cppcoro::task<void> AsyncMux::promote(BlockId block_id, TierId hot_tier) {
 	const TierId current = metadata_.tier_of(block_id);
 	if (current == hot_tier) {
@@ -231,6 +285,8 @@ cppcoro::task<void> AsyncMux::promote(BlockId block_id, TierId hot_tier) {
 	co_await migrate(block_id, current, hot_tier);
 }
 
+// AsyncMux::split
+//         Breaks a byte range into fixed-size write blocks.
 std::vector<WriteBlock> AsyncMux::split(uint64_t offset, std::span<const Byte> data) {
 	std::vector<WriteBlock> out;
 	size_t cursor = 0;
@@ -251,6 +307,8 @@ std::vector<WriteBlock> AsyncMux::split(uint64_t offset, std::span<const Byte> d
 	return out;
 }
 
+// AsyncMux::assemble
+//         Reconstructs a contiguous read buffer from block fragments.
 IoBuffer AsyncMux::assemble(const std::vector<BlockLocation>& locations,
 							std::vector<IoBuffer> blocks,
 							uint64_t read_offset,
@@ -278,14 +336,20 @@ IoBuffer AsyncMux::assemble(const std::vector<BlockLocation>& locations,
 	return out;
 }
 
+// FuseFrontend::FuseFrontend
+//         Creates a frontend adapter around AsyncMux operations.
 FuseFrontend::FuseFrontend(AsyncMux& mux) : mux_(mux) {}
 
+// FuseFrontend::on_read
+//         Handles a frontend read request through AsyncMux.
 cppcoro::task<IoBuffer> FuseFrontend::on_read(const std::string& path,
 										  uint64_t offset,
 										  uint64_t size) {
 	co_return co_await mux_.read(path, offset, size);
 }
 
+// FuseFrontend::on_write
+//         Handles a frontend write request through AsyncMux.
 cppcoro::task<void> FuseFrontend::on_write(const std::string& path,
 										   uint64_t offset,
 										   std::span<const Byte> data) {
