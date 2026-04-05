@@ -1,6 +1,7 @@
 BUILD_DIR := build
 SAN ?= 0
 IMAGE ?= asyncmux
+DOCKER_PLATFORM ?= linux/amd64
 
 ifeq ($(SAN),1)
 CMAKE_SAN_FLAG := -DENABLE_SANITIZERS=ON
@@ -29,9 +30,9 @@ rebuild: clean build
 docker: docker-build
 
 docker-build:
-	docker build --platform linux/amd64 -t $(IMAGE) .
+	docker build --platform $(DOCKER_PLATFORM) -t $(IMAGE) .
 
 docker-run:
-	docker run --rm $(IMAGE)
+	docker run --rm --platform $(DOCKER_PLATFORM) $(IMAGE)
 
 docker-rebuild: docker-build docker-run
