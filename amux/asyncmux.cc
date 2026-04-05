@@ -4,11 +4,11 @@ namespace asyncmux {
 
 IoBuffer::IoBuffer() = default;
 
-IoBuffer::IoBuffer(std::size_t n) : data(n) {}
+IoBuffer::IoBuffer(size_t n) : data(n) {}
 
 IoBuffer::IoBuffer(std::vector<Byte> bytes) : data(std::move(bytes)) {}
 
-std::size_t IoBuffer::size() const {
+size_t IoBuffer::size() const {
 	return data.size();
 }
 
@@ -21,8 +21,8 @@ const Byte* IoBuffer::bytes() const {
 }
 
 std::vector<BlockLocation> MetadataStore::lookup(const std::string& path,
-												 std::uint64_t offset,
-												 std::uint64_t size) const {
+												 uint64_t offset,
+												 uint64_t size) const {
 	std::shared_lock lock(mu_);
 	auto it = file_map_.find(path);
 	if (it == file_map_.end()) {
@@ -45,8 +45,8 @@ std::vector<BlockLocation> MetadataStore::lookup(const std::string& path,
 void MetadataStore::update(const std::string& path,
 						   BlockId block_id,
 						   TierId tier_id,
-						   std::uint64_t file_offset,
-						   std::uint64_t size) {
+						   uint64_t file_offset,
+						   uint64_t size) {
 	std::unique_lock lock(mu_);
 	auto& vec = file_map_[path];
 	auto it = std::find_if(vec.begin(), vec.end(), [&](const BlockLocation& loc) {
@@ -99,8 +99,8 @@ std::string MemoryTier::name() const {
 }
 
 cppcoro::task<IoBuffer> MemoryTier::read_block(BlockId block_id,
-											   std::uint64_t offset,
-											   std::uint64_t size) {
+										   uint64_t offset,
+										   uint64_t size) {
 	co_await pool_.schedule();
 
 	std::lock_guard lock(mu_);
@@ -112,21 +112,21 @@ cppcoro::task<IoBuffer> MemoryTier::read_block(BlockId block_id,
 		throw IoError("read_block: offset out of range");
 	}
 
-	const auto available = it->second.size() - static_cast<std::size_t>(offset);
-	const auto n = std::min<std::size_t>(size, available);
+	const auto available = it->second.size() - static_cast<size_t>(offset);
+	const auto n = std::min<size_t>(size, available);
 	std::vector<Byte> out(n);
 	std::copy_n(it->second.data() + offset, n, out.data());
 	co_return IoBuffer{std::move(out)};
 }
 
 cppcoro::task<void> MemoryTier::write_block(BlockId block_id,
-											std::uint64_t offset,
+											uint64_t offset,
 											std::span<const Byte> data) {
 	co_await pool_.schedule();
 
 	std::lock_guard lock(mu_);
 	auto& dst = blocks_[block_id];
-	const std::size_t needed = static_cast<std::size_t>(offset) + data.size();
+	const size_t needed = static_cast<size_t>(offset) + data.size();
 	if (dst.size() < needed) {
 		dst.resize(needed);
 	}
@@ -179,8 +179,8 @@ AsyncMux::AsyncMux(TierRegistry& tiers,
 	: tiers_(tiers), metadata_(metadata), placement_(placement), pool_(pool) {}
 
 cppcoro::task<IoBuffer> AsyncMux::read(const std::string& path,
-									   std::uint64_t offset,
-									   std::uint64_t size) {
+									   uint64_t offset,
+									   uint64_t size) {
 	auto blocks = metadata_.lookup(path, offset, size);
 	std::vector<cppcoro::task<IoBuffer>> tasks;
 	tasks.reserve(blocks.size());
@@ -195,7 +195,7 @@ cppcoro::task<IoBuffer> AsyncMux::read(const std::string& path,
 }
 
 cppcoro::task<void> AsyncMux::write(const std::string& path,
-									std::uint64_t offset,
+									uint64_t offset,
 									std::span<const Byte> data) {
 	auto blocks = split(offset, data);
 
@@ -231,12 +231,12 @@ cppcoro::task<void> AsyncMux::promote(BlockId block_id, TierId hot_tier) {
 	co_await migrate(block_id, current, hot_tier);
 }
 
-std::vector<WriteBlock> AsyncMux::split(std::uint64_t offset, std::span<const Byte> data) {
+std::vector<WriteBlock> AsyncMux::split(uint64_t offset, std::span<const Byte> data) {
 	std::vector<WriteBlock> out;
-	std::size_t cursor = 0;
+	size_t cursor = 0;
 
 	while (cursor < data.size()) {
-		const std::size_t n = std::min<std::size_t>(kBlockSize, data.size() - cursor);
+		const size_t n = std::min<size_t>(kBlockSize, data.size() - cursor);
 		std::vector<Byte> chunk(n);
 		std::copy_n(data.begin() + cursor, n, chunk.begin());
 
@@ -253,24 +253,24 @@ std::vector<WriteBlock> AsyncMux::split(std::uint64_t offset, std::span<const By
 
 IoBuffer AsyncMux::assemble(const std::vector<BlockLocation>& locations,
 							std::vector<IoBuffer> blocks,
-							std::uint64_t read_offset,
-							std::uint64_t read_size) {
-	IoBuffer out(static_cast<std::size_t>(read_size));
+							uint64_t read_offset,
+							uint64_t read_size) {
+	IoBuffer out(static_cast<size_t>(read_size));
 
-	for (std::size_t i = 0; i < locations.size(); ++i) {
+	for (size_t i = 0; i < locations.size(); ++i) {
 		const auto& loc = locations[i];
 		const auto& src = blocks[i].data;
 
-		const std::uint64_t copy_begin = std::max<std::uint64_t>(loc.file_offset, read_offset);
-		const std::uint64_t copy_end = std::min<std::uint64_t>(loc.file_offset + loc.size,
+		const uint64_t copy_begin = std::max<uint64_t>(loc.file_offset, read_offset);
+		const uint64_t copy_end = std::min<uint64_t>(loc.file_offset + loc.size,
 															   read_offset + read_size);
 		if (copy_begin >= copy_end) {
 			continue;
 		}
 
-		const std::size_t src_offset = static_cast<std::size_t>(copy_begin - loc.file_offset);
-		const std::size_t dst_offset = static_cast<std::size_t>(copy_begin - read_offset);
-		const std::size_t n = static_cast<std::size_t>(copy_end - copy_begin);
+		const size_t src_offset = static_cast<size_t>(copy_begin - loc.file_offset);
+		const size_t dst_offset = static_cast<size_t>(copy_begin - read_offset);
+		const size_t n = static_cast<size_t>(copy_end - copy_begin);
 
 		std::copy_n(src.begin() + src_offset, n, out.data.begin() + dst_offset);
 	}
@@ -281,13 +281,13 @@ IoBuffer AsyncMux::assemble(const std::vector<BlockLocation>& locations,
 FuseFrontend::FuseFrontend(AsyncMux& mux) : mux_(mux) {}
 
 cppcoro::task<IoBuffer> FuseFrontend::on_read(const std::string& path,
-											  std::uint64_t offset,
-											  std::uint64_t size) {
+										  uint64_t offset,
+										  uint64_t size) {
 	co_return co_await mux_.read(path, offset, size);
 }
 
 cppcoro::task<void> FuseFrontend::on_write(const std::string& path,
-										   std::uint64_t offset,
+										   uint64_t offset,
 										   std::span<const Byte> data) {
 	co_await mux_.write(path, offset, data);
 }

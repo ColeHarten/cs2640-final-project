@@ -21,19 +21,22 @@
 namespace asyncmux {
 
 using Byte = std::byte;
-using BlockId = std::uint64_t;
+using size_t = std::size_t;
+using uint64_t = std::uint64_t;
+using BlockId = uint64_t;
 using TierId = std::uint32_t;
 
-static constexpr std::size_t kBlockSize = 4096;
+
+static constexpr size_t kBlockSize = 4096;
 
 struct IoBuffer {
     std::vector<Byte> data;
 
     IoBuffer();
-    explicit IoBuffer(std::size_t n);
+    explicit IoBuffer(size_t n);
     explicit IoBuffer(std::vector<Byte> bytes);
 
-    std::size_t size() const;
+    size_t size() const;
     Byte* bytes();
     const Byte* bytes() const;
 };
@@ -41,14 +44,14 @@ struct IoBuffer {
 struct BlockLocation {
     BlockId block_id;
     TierId tier_id;
-    std::uint64_t file_offset;
-    std::uint64_t block_offset;
-    std::uint64_t size;
+    uint64_t file_offset;
+    uint64_t block_offset;
+    uint64_t size;
 };
 
 struct WriteBlock {
     BlockId block_id;
-    std::uint64_t file_offset;
+    uint64_t file_offset;
     std::vector<Byte> data;
 };
 
@@ -60,14 +63,14 @@ public:
 class MetadataStore {
 public:
     std::vector<BlockLocation> lookup(const std::string& path,
-                                      std::uint64_t offset,
-                                      std::uint64_t size) const;
+                                      uint64_t offset,
+                                      uint64_t size) const;
 
     void update(const std::string& path,
                 BlockId block_id,
                 TierId tier_id,
-                std::uint64_t file_offset,
-                std::uint64_t size);
+                uint64_t file_offset,
+                uint64_t size);
 
     void update_block(BlockId block_id, TierId new_tier);
 
@@ -86,11 +89,11 @@ public:
     virtual std::string name() const = 0;
 
     virtual cppcoro::task<IoBuffer> read_block(BlockId block_id,
-                                               std::uint64_t offset,
-                                               std::uint64_t size) = 0;
+                                                              uint64_t offset,
+                                                              uint64_t size) = 0;
 
     virtual cppcoro::task<void> write_block(BlockId block_id,
-                                            std::uint64_t offset,
+                                                          uint64_t offset,
                                             std::span<const Byte> data) = 0;
 
     virtual cppcoro::task<void> delete_block(BlockId block_id) = 0;
@@ -104,11 +107,11 @@ public:
     std::string name() const override;
 
     cppcoro::task<IoBuffer> read_block(BlockId block_id,
-                                       std::uint64_t offset,
-                                       std::uint64_t size) override;
+                                                    uint64_t offset,
+                                                    uint64_t size) override;
 
     cppcoro::task<void> write_block(BlockId block_id,
-                                    std::uint64_t offset,
+                                                uint64_t offset,
                                     std::span<const Byte> data) override;
 
     cppcoro::task<void> delete_block(BlockId block_id) override;
@@ -165,11 +168,11 @@ public:
              cppcoro::static_thread_pool& pool);
 
     cppcoro::task<IoBuffer> read(const std::string& path,
-                                 std::uint64_t offset,
-                                 std::uint64_t size);
+                                            uint64_t offset,
+                                            uint64_t size);
 
     cppcoro::task<void> write(const std::string& path,
-                              std::uint64_t offset,
+                                        uint64_t offset,
                               std::span<const Byte> data);
 
     cppcoro::task<void> migrate(BlockId block_id, TierId src_id, TierId dst_id);
@@ -177,12 +180,12 @@ public:
     cppcoro::task<void> promote(BlockId block_id, TierId hot_tier);
 
 private:
-    std::vector<WriteBlock> split(std::uint64_t offset, std::span<const Byte> data);
+    std::vector<WriteBlock> split(uint64_t offset, std::span<const Byte> data);
 
     IoBuffer assemble(const std::vector<BlockLocation>& locations,
                       std::vector<IoBuffer> blocks,
-                      std::uint64_t read_offset,
-                      std::uint64_t read_size);
+                      uint64_t read_offset,
+                      uint64_t read_size);
 
     TierRegistry& tiers_;
     MetadataStore& metadata_;
@@ -196,11 +199,11 @@ public:
     explicit FuseFrontend(AsyncMux& mux);
 
     cppcoro::task<IoBuffer> on_read(const std::string& path,
-                                    std::uint64_t offset,
-                                    std::uint64_t size);
+                                                uint64_t offset,
+                                                uint64_t size);
 
     cppcoro::task<void> on_write(const std::string& path,
-                                 std::uint64_t offset,
+                                            uint64_t offset,
                                  std::span<const Byte> data);
 
 private:
