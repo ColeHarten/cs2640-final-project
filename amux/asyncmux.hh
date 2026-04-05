@@ -30,6 +30,7 @@ using TierId = std::uint32_t;
 
 static constexpr size_t kBlockSize = 4096;
 
+// Value type that owns a contiguous byte buffer for read and write results.
 struct IoBuffer {
     std::vector<Byte> data;
 
@@ -42,6 +43,7 @@ struct IoBuffer {
     const Byte* bytes() const;
 };
 
+// Describes where a file range is stored within a tier and block.
 struct BlockLocation {
     BlockId block_id;
     TierId tier_id;
@@ -50,17 +52,20 @@ struct BlockLocation {
     uint64_t size;
 };
 
+// Write request payload describing a block that should be persisted.
 struct WriteBlock {
     BlockId block_id;
     uint64_t file_offset;
     std::vector<Byte> data;
 };
 
+// Exception type used for I/O and storage-related failures.
 class IoError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
+// Thread-safe metadata store that tracks which blocks belong to which file path.
 class MetadataStore {
 public:
     std::vector<BlockLocation> lookup(const std::string& path,
@@ -82,6 +87,7 @@ private:
     std::unordered_map<std::string, std::vector<BlockLocation>> file_map_;
 };
 
+// Storage-tier interface implemented by concrete backends.
 class Tier {
 public:
     virtual ~Tier() = default;
@@ -100,6 +106,7 @@ public:
     virtual cppcoro::task<void> delete_block(BlockId block_id) = 0;
 };
 
+// In-memory storage-tier implementation derived from Tier.
 class MemoryTier final : public Tier {
 public:
     MemoryTier(TierId id, std::string name, cppcoro::static_thread_pool& pool);
@@ -125,6 +132,7 @@ private:
     std::unordered_map<BlockId, std::vector<Byte>> blocks_;
 };
 
+// Disk-backed storage-tier implementation derived from Tier.
 class DiskTier final : public Tier {
 public:
     DiskTier(TierId id,
@@ -155,6 +163,7 @@ private:
     std::mutex mu_;
 };
 
+// Owns and resolves Tier instances by tier id.
 class TierRegistry {
 public:
     void add(std::unique_ptr<Tier> tier);
@@ -167,12 +176,14 @@ private:
     std::unordered_map<TierId, std::unique_ptr<Tier>> tiers_;
 };
 
+// Placement-policy interface used by AsyncMux to choose a destination tier.
 class PlacementPolicy {
 public:
     virtual ~PlacementPolicy() = default;
     virtual TierId choose_tier(const WriteBlock& block) = 0;
 };
 
+// SimplePlacementPolicy is a concrete PlacementPolicy that always chooses one tier.
 class SimplePlacementPolicy final : public PlacementPolicy {
 public:
     explicit SimplePlacementPolicy(TierId default_tier);
@@ -183,6 +194,7 @@ private:
     TierId default_tier_;
 };
 
+// Monotonic block-id allocator used by AsyncMux for new blocks.
 class BlockAllocator {
 public:
     BlockId next();
@@ -191,6 +203,7 @@ private:
     BlockId next_id_ = 1;
 };
 
+// Core async coordinator that routes reads, writes, migration, and promotion across tiers.
 class AsyncMux {
 public:
     AsyncMux(TierRegistry& tiers,
@@ -227,6 +240,7 @@ private:
     bool auto_migration_enabled_ = false;
 };
 
+// Thin coroutine-friendly frontend wrapper around AsyncMux.
 class FuseFrontend {
 public:
     explicit FuseFrontend(AsyncMux& mux);
