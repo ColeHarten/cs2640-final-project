@@ -1,1 +1,0 @@
-/usr/bin/c++ -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/asyncmux_tests.dir/test.cc.o CMakeFiles/asyncmux_tests.dir/amux/asyncmux.cc.o -o asyncmux_tests  libcppcoro_static_thread_pool.a
