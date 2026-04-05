@@ -20,6 +20,10 @@ using asyncmux::MetadataStore;
 using asyncmux::SimplePlacementPolicy;
 using asyncmux::TierRegistry;
 
+using cppcoro::task;
+using cppcoro::static_thread_pool;
+using cppcoro::sync_wait;
+
 namespace {
 
 constexpr const char* kColorRed = "\x1b[31m";
@@ -63,7 +67,7 @@ void assert_true(bool cond, const std::string& message) {
 }
 
 struct Fixture {
-    cppcoro::static_thread_pool pool{4};
+    static_thread_pool pool{4};
     TierRegistry tiers;
     MetadataStore metadata;
     SimplePlacementPolicy placement{1};
@@ -76,7 +80,7 @@ struct Fixture {
     }
 };
 
-cppcoro::task<void> test_basic_write_then_read(Fixture& fx) {
+task<void> test_basic_write_then_read(Fixture& fx) {
     auto bytes = to_bytes("hello asyncmux");
     co_await fx.mux.write("/alpha", 0, std::span<const Byte>(bytes.data(), bytes.size()));
 
@@ -84,7 +88,7 @@ cppcoro::task<void> test_basic_write_then_read(Fixture& fx) {
     assert_eq(to_string(out), "hello asyncmux", "basic write/read round-trip");
 }
 
-cppcoro::task<void> test_partial_read(Fixture& fx) {
+task<void> test_partial_read(Fixture& fx) {
     auto bytes = to_bytes("abcdefghijklmnop");
     co_await fx.mux.write("/beta", 0, std::span<const Byte>(bytes.data(), bytes.size()));
 
@@ -92,7 +96,7 @@ cppcoro::task<void> test_partial_read(Fixture& fx) {
     assert_eq(to_string(out), "defgh", "partial read returns requested slice");
 }
 
-cppcoro::task<void> test_multi_block_round_trip(Fixture& fx) {
+task<void> test_multi_block_round_trip(Fixture& fx) {
     std::string large(9000, 'x');
     for (int i = 0; i < 26; ++i) {
         large[300 + i] = static_cast<char>('A' + i);
@@ -106,7 +110,7 @@ cppcoro::task<void> test_multi_block_round_trip(Fixture& fx) {
     assert_eq(to_string(out), large, "multi-block write/read round-trip");
 }
 
-cppcoro::task<void> test_cross_block_partial_read(Fixture& fx) {
+task<void> test_cross_block_partial_read(Fixture& fx) {
     std::string large(5000, 'q');
     large[4094] = 'X';
     large[4095] = 'Y';
@@ -120,7 +124,7 @@ cppcoro::task<void> test_cross_block_partial_read(Fixture& fx) {
     assert_eq(to_string(out), "XYZW", "read spanning block boundary");
 }
 
-cppcoro::task<void> test_promote_updates_metadata(Fixture& fx) {
+task<void> test_promote_updates_metadata(Fixture& fx) {
     auto bytes = to_bytes("promote-me");
     co_await fx.mux.write("/epsilon", 0, std::span<const Byte>(bytes.data(), bytes.size()));
 
@@ -137,7 +141,7 @@ cppcoro::task<void> test_promote_updates_metadata(Fixture& fx) {
     assert_eq(to_string(out), "promote-me", "data survives migrate + promote");
 }
 
-cppcoro::task<void> test_missing_file_read_returns_empty(Fixture& fx) {
+task<void> test_missing_file_read_returns_empty(Fixture& fx) {
     IoBuffer out = co_await fx.mux.read("/does-not-exist", 0, 32);
     assert_true(out.data.size() == 32, "current scaffold zero-fills missing file reads to requested size");
     for (Byte b : out.data) {
@@ -145,7 +149,7 @@ cppcoro::task<void> test_missing_file_read_returns_empty(Fixture& fx) {
     }
 }
 
-cppcoro::task<void> test_overwrite_appends_new_metadata_in_current_scaffold(Fixture& fx) {
+task<void> test_overwrite_appends_new_metadata_in_current_scaffold(Fixture& fx) {
     auto first = to_bytes("AAAA");
     auto second = to_bytes("BBBB");
 
@@ -156,7 +160,7 @@ cppcoro::task<void> test_overwrite_appends_new_metadata_in_current_scaffold(Fixt
     assert_true(locs.size() >= 2, "current scaffold records multiple versions on overlapping writes");
 }
 
-cppcoro::task<void> run_all_tests(Fixture& fx) {
+task<void> run_all_tests(Fixture& fx) {
     co_await test_basic_write_then_read(fx);
     co_await test_partial_read(fx);
     co_await test_multi_block_round_trip(fx);
@@ -171,7 +175,7 @@ cppcoro::task<void> run_all_tests(Fixture& fx) {
 int main() {
     try {
         Fixture fx;
-        cppcoro::sync_wait(run_all_tests(fx));
+        sync_wait(run_all_tests(fx));
         std::cout << kColorBoldGreen << "All AsyncMux scaffold tests passed." << kColorReset << "\n";
         return 0;
     } catch (const std::exception& ex) {
