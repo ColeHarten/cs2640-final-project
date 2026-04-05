@@ -24,7 +24,7 @@ build:
 
 run: 
 ifeq ($(TEST),all)
-	docker run --rm --platform $(DOCKER_PLATFORM) $(IMAGE) /bin/sh -lc 'set -e; for t in $(TEST_BINS); do /app/build/$$t; done'
+	docker run --rm --platform $(DOCKER_PLATFORM) $(IMAGE) /bin/sh -lc 'set -e; for t in $(TEST_BINS); do /app/build/$$t; done && printf "\033[1;32mAll tests passed.\033[0m\n"'
 else
 	docker run --rm --platform $(DOCKER_PLATFORM) $(IMAGE) /app/build/$(TEST)
 endif
