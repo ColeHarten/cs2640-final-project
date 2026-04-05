@@ -50,6 +50,8 @@ struct BlockLocation {
     uint64_t file_offset;
     uint64_t block_offset;
     uint64_t size;
+    uint64_t segment_id;
+    uint64_t tier_offset;
 };
 
 // Write request payload describing a block that should be persisted.
@@ -76,9 +78,18 @@ public:
                 BlockId block_id,
                 TierId tier_id,
                 uint64_t file_offset,
-                uint64_t size);
+                uint64_t size,
+                uint64_t segment_id,
+                uint64_t tier_offset);
 
     void update_block(BlockId block_id, TierId new_tier);
+
+    void relocate_block(BlockId block_id,
+                        TierId new_tier,
+                        uint64_t new_segment_id,
+                        uint64_t new_tier_offset);
+
+    BlockLocation get_block(BlockId block_id) const;
 
     TierId tier_of(BlockId block_id) const;
 
@@ -104,6 +115,50 @@ public:
                                             std::span<const Byte> data) = 0;
 
     virtual cppcoro::task<void> delete_block(BlockId block_id) = 0;
+};
+
+class SegmentFileTier final : public Tier {
+public:
+    SegmentFileTier(TierId id,
+                    std::string name,
+                    std::filesystem::path root_dir,
+                    cppcoro::static_thread_pool& pool,
+                    uint64_t segment_size = 64ull * 1024 * 1024);
+
+    TierId id() const override;
+    std::string name() const override;
+
+    std::pair<uint64_t, uint64_t> allocate_extent(uint64_t size);
+
+    cppcoro::task<IoBuffer> read_extent(uint64_t segment_id,
+                                        uint64_t tier_offset,
+                                        uint64_t size);
+
+    cppcoro::task<void> write_extent(uint64_t segment_id,
+                                     uint64_t tier_offset,
+                                     std::span<const Byte> data);
+
+    cppcoro::task<IoBuffer> read_block(BlockId block_id,
+                                       uint64_t offset,
+                                       uint64_t size) override;
+
+    cppcoro::task<void> write_block(BlockId block_id,
+                                    uint64_t offset,
+                                    std::span<const Byte> data) override;
+
+    cppcoro::task<void> delete_block(BlockId block_id) override;
+
+private:
+    std::filesystem::path segment_path(uint64_t segment_id) const;
+
+    TierId id_;
+    std::string name_;
+    std::filesystem::path root_dir_;
+    cppcoro::static_thread_pool& pool_;
+    std::mutex mu_;
+    uint64_t segment_size_;
+    uint64_t current_segment_id_ = 0;
+    uint64_t current_segment_offset_ = 0;
 };
 
 // In-memory storage-tier implementation derived from Tier.
@@ -183,10 +238,10 @@ public:
     virtual TierId choose_tier(const WriteBlock& block) = 0;
 };
 
-// SimplePlacementPolicy is a concrete PlacementPolicy that always chooses one tier.
-class SimplePlacementPolicy final : public PlacementPolicy {
+// ConstantPlacementPolicy is a concrete PlacementPolicy that always chooses one tier.
+class ConstantPlacementPolicy final : public PlacementPolicy {
 public:
-    explicit SimplePlacementPolicy(TierId default_tier);
+    explicit ConstantPlacementPolicy(TierId default_tier);
 
     TierId choose_tier(const WriteBlock&) override;
 

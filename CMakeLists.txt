@@ -32,8 +32,7 @@ function(add_asyncmux_test target source_file)
     add_executable(${target}
         ${source_file}
         amux/asyncmux.cc
-        amux/tiers/memory_tier.cc
-        amux/tiers/disk_tier.cc
+        amux/tiers/filesystem_tier.cc
     )
 
     target_include_directories(${target}
