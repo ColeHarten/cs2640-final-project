@@ -25,6 +25,7 @@ using asyncmux::Byte;
 using asyncmux::FileSystemTier;
 using asyncmux::IoBuffer;
 using asyncmux::MetadataStore;
+using asyncmux::MutablePlacementPolicy;
 using asyncmux::PlacementPolicy;
 using asyncmux::TierId;
 using asyncmux::TierRegistry;
@@ -144,22 +145,6 @@ void mount_ext4_image_strict(const fs::path& image, const fs::path& root) {
         throw std::runtime_error("mounted tier is not ext4: " + root.string());
     }
 }
-
-class MutablePlacementPolicy final : public PlacementPolicy {
-public:
-    explicit MutablePlacementPolicy(TierId tier) : tier_(tier) {}
-
-    void set(TierId tier) {
-        tier_ = tier;
-    }
-
-    TierId choose_tier(const WriteBlock&) override {
-        return tier_;
-    }
-
-private:
-    TierId tier_;
-};
 
 std::vector<BlockLocation> sorted_locs(MetadataStore& metadata,
                                        const std::string& path,

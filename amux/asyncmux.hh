@@ -176,6 +176,23 @@ private:
     TierId default_tier_;
 };
 
+// MutablePlacementPolicy allows runtime tier selection for testing and development.
+class MutablePlacementPolicy final : public PlacementPolicy {
+public:
+    explicit MutablePlacementPolicy(TierId initial_tier) : tier_(initial_tier) {}
+
+    void set(TierId tier) {
+        tier_ = tier;
+    }
+
+    TierId choose_tier(const WriteBlock&) override {
+        return tier_;
+    }
+
+private:
+    TierId tier_;
+};
+
 // Monotonic block-id allocator used by AsyncMux for new logical chunks.
 class BlockAllocator {
 public:
