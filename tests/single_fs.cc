@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -48,9 +49,21 @@ std::vector<BlockLocation> sorted_locs(MetadataStore& metadata,
     auto locs = metadata.lookup(path, offset, size);
     std::sort(locs.begin(), locs.end(),
               [](const BlockLocation& a, const BlockLocation& b) {
-                  return a.file_offset < b.file_offset;
+                  if (a.file_offset != b.file_offset) {
+                      return a.file_offset < b.file_offset;
+                  }
+                  return a.block_id < b.block_id;
               });
     return locs;
+}
+
+void assert_non_overlapping(const std::vector<BlockLocation>& locs,
+                            const std::string& context) {
+    for (std::size_t i = 1; i < locs.size(); ++i) {
+        const auto prev_end = locs[i - 1].file_offset + locs[i - 1].size;
+        assert_true(prev_end <= locs[i].file_offset,
+                    context + ": metadata extents must be non-overlapping");
+    }
 }
 
 struct Fixture {
@@ -77,8 +90,9 @@ task<void> test_single_tier_round_trip(Fixture& fx) {
               "single tier write/read round-trip");
 
     auto locs = sorted_locs(fx.metadata, "/alpha", 0, bytes.size());
-    assert_true(locs.size() == 1, "small write should create one block");
+    assert_true(locs.size() == 1, "small write should create one extent");
     assert_true(locs[0].tier_id == 1, "single filesystem tier id should be 1");
+    assert_non_overlapping(locs, "alpha");
     assert_true(fs::exists(kSingleRoot / "alpha"), "file should exist under root");
 }
 
@@ -100,6 +114,10 @@ task<void> test_partial_and_cross_block_read(Fixture& fx) {
     IoBuffer cross = co_await fx.mux.read("/beta", kBlockSize - 2, 4);
     assert_eq(to_string(cross), "XYZW",
               "cross-block read should stitch bytes correctly");
+
+    auto locs = sorted_locs(fx.metadata, "/beta", 0, bytes.size());
+    assert_true(locs.size() == 2, "beta should span exactly two extents");
+    assert_non_overlapping(locs, "beta");
 }
 
 task<void> test_sparse_write_zero_fill(Fixture& fx) {
@@ -144,6 +162,52 @@ task<void> test_two_files_are_isolated(Fixture& fx) {
     assert_true(fs::exists(kSingleRoot / "dir" / "b"), "second path should exist on disk");
 }
 
+task<void> test_overwrite_replaces_old_data(Fixture& fx) {
+    auto first = to_bytes("abcdefghij");
+    co_await fx.mux.write("/overwrite", 0,
+                          std::span<const Byte>(first.data(), first.size()));
+
+    auto second = to_bytes("XYZ");
+    co_await fx.mux.write("/overwrite", 3,
+                          std::span<const Byte>(second.data(), second.size()));
+
+    IoBuffer out = co_await fx.mux.read("/overwrite", 0, 10);
+    assert_eq(to_string(out), "abcXYZghij",
+              "overwrite should replace old bytes, not duplicate extents");
+
+    auto locs = sorted_locs(fx.metadata, "/overwrite", 0, 10);
+    assert_non_overlapping(locs, "overwrite");
+}
+
+task<void> test_cross_block_overwrite_replaces_old_data(Fixture& fx) {
+    std::string payload(kBlockSize + 32, 'a');
+    payload[kBlockSize - 1] = 'L';
+    payload[kBlockSize] = 'R';
+
+    auto original = to_bytes(payload);
+    co_await fx.mux.write("/cross_overwrite", 0,
+                          std::span<const Byte>(original.data(), original.size()));
+
+    std::string patch = "0123456789";
+    const std::uint64_t patch_offset = kBlockSize - 4;
+    auto patch_bytes = to_bytes(patch);
+    co_await fx.mux.write("/cross_overwrite", patch_offset,
+                          std::span<const Byte>(patch_bytes.data(), patch_bytes.size()));
+
+    payload.replace(static_cast<std::size_t>(patch_offset), patch.size(), patch);
+
+    IoBuffer out = co_await fx.mux.read("/cross_overwrite", 0, payload.size());
+    assert_eq(to_string(out), payload,
+              "cross-block overwrite should preserve newest bytes across extent boundaries");
+
+    IoBuffer window = co_await fx.mux.read("/cross_overwrite", patch_offset, patch.size());
+    assert_eq(to_string(window), patch,
+              "window around cross-block overwrite should match patch");
+
+    auto locs = sorted_locs(fx.metadata, "/cross_overwrite", 0, payload.size());
+    assert_non_overlapping(locs, "cross_overwrite");
+}
+
 task<void> test_promote_noop_on_single_tier(Fixture& fx) {
     std::string payload(7000, 'p');
     for (int i = 0; i < 26; ++i) {
@@ -174,6 +238,8 @@ task<void> run_all(Fixture& fx) {
     co_await test_sparse_write_zero_fill(fx);
     co_await test_missing_file_reads_as_zeroes(fx);
     co_await test_two_files_are_isolated(fx);
+    co_await test_overwrite_replaces_old_data(fx);
+    co_await test_cross_block_overwrite_replaces_old_data(fx);
     co_await test_promote_noop_on_single_tier(fx);
 }
 

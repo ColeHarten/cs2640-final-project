@@ -6,6 +6,7 @@
 #include <cppcoro/static_thread_pool.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -29,7 +30,6 @@ using TierId = std::uint32_t;
 
 static constexpr size_t kBlockSize = 4096;
 
-// Value type that owns a contiguous byte buffer for read and write results.
 struct IoBuffer {
     std::vector<Byte> data;
 
@@ -42,7 +42,6 @@ struct IoBuffer {
     const Byte* bytes() const;
 };
 
-// Describes where a logical file range currently lives.
 struct BlockLocation {
     BlockId block_id;
     TierId tier_id;
@@ -50,14 +49,12 @@ struct BlockLocation {
     uint64_t size;
 };
 
-// Write request payload describing a logical chunk that should be persisted.
 struct WriteBlock {
     BlockId block_id;
     uint64_t file_offset;
     std::vector<Byte> data;
 };
 
-// Exception type used for I/O and storage-related failures.
 class IoError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -68,7 +65,6 @@ struct LocatedBlock {
     BlockLocation location;
 };
 
-// Thread-safe metadata store that tracks which logical ranges belong to which file path.
 class MetadataStore {
 public:
     std::vector<BlockLocation> lookup(const std::string& path,
@@ -89,13 +85,28 @@ public:
 
     TierId tier_of(BlockId block_id) const;
 
+    uint64_t version_of(const std::string& path) const;
+    uint64_t bump_version(const std::string& path);
+
 private:
+    struct FileEntry {
+        std::vector<BlockLocation> extents;
+        uint64_t version = 0;
+    };
+
+    struct BlockIndexEntry {
+        std::string path;
+        uint64_t file_offset = 0;
+        uint64_t size = 0;
+    };
+
+    void rebuild_block_index_locked(const std::string& path);
+
     mutable std::shared_mutex mu_;
-    std::unordered_map<std::string, std::vector<BlockLocation>> file_map_;
+    std::unordered_map<std::string, FileEntry> file_map_;
+    std::unordered_map<BlockId, BlockIndexEntry> block_index_;
 };
 
-// Storage-tier interface implemented by concrete backends.
-// This is now Mux-like: the lower tier exposes file-oriented offset I/O.
 class Tier {
 public:
     virtual ~Tier() = default;
@@ -114,9 +125,6 @@ public:
     virtual cppcoro::task<void> remove_file(const std::string& relative_path) = 0;
 };
 
-// Mounted-filesystem-backed tier.
-// Files are rooted under root_dir and written at logical offsets, allowing the
-// underlying filesystem to manage allocation and sparse regions.
 class FileSystemTier final : public Tier {
 public:
     FileSystemTier(TierId id,
@@ -140,15 +148,16 @@ public:
 private:
     std::filesystem::path full_path(const std::string& relative_path) const;
     void ensure_parent_dirs(const std::filesystem::path& p) const;
+    std::shared_ptr<std::shared_mutex> lock_for_path(const std::filesystem::path& p) const;
 
     TierId id_;
     std::string name_;
     std::filesystem::path root_dir_;
     cppcoro::static_thread_pool& pool_;
-    std::mutex mu_;
+    mutable std::mutex lock_table_mu_;
+    mutable std::unordered_map<std::string, std::shared_ptr<std::shared_mutex>> file_locks_;
 };
 
-// Owns and resolves Tier instances by tier id.
 class TierRegistry {
 public:
     void add(std::unique_ptr<Tier> tier);
@@ -159,14 +168,12 @@ private:
     std::unordered_map<TierId, std::unique_ptr<Tier>> tiers_;
 };
 
-// Placement-policy interface used by AsyncMux to choose a destination tier.
 class PlacementPolicy {
 public:
     virtual ~PlacementPolicy() = default;
     virtual TierId choose_tier(const WriteBlock& block) = 0;
 };
 
-// ConstantPlacementPolicy always chooses one tier.
 class ConstantPlacementPolicy final : public PlacementPolicy {
 public:
     explicit ConstantPlacementPolicy(TierId default_tier);
@@ -176,7 +183,6 @@ private:
     TierId default_tier_;
 };
 
-// MutablePlacementPolicy allows runtime tier selection for testing and development.
 class MutablePlacementPolicy final : public PlacementPolicy {
 public:
     explicit MutablePlacementPolicy(TierId initial_tier) : tier_(initial_tier) {}
@@ -193,16 +199,14 @@ private:
     TierId tier_;
 };
 
-// Monotonic block-id allocator used by AsyncMux for new logical chunks.
 class BlockAllocator {
 public:
     BlockId next();
 
 private:
-    BlockId next_id_ = 1;
+    std::atomic<BlockId> next_id_{1};
 };
 
-// Core async coordinator that routes reads, writes, migration, and promotion across tiers.
 class AsyncMux {
 public:
     AsyncMux(TierRegistry& tiers,
@@ -224,6 +228,11 @@ public:
     cppcoro::task<void> promote(BlockId block_id, TierId hot_tier);
 
 private:
+    struct PreparedWrite {
+        WriteBlock block;
+        TierId tier_id;
+    };
+
     std::vector<WriteBlock> split(uint64_t offset, std::span<const Byte> data);
 
     IoBuffer assemble(const std::vector<BlockLocation>& locations,
@@ -239,7 +248,6 @@ private:
     bool auto_migration_enabled_ = false;
 };
 
-// Thin coroutine-friendly frontend wrapper around AsyncMux.
 class FuseFrontend {
 public:
     explicit FuseFrontend(AsyncMux& mux);

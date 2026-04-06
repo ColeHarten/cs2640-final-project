@@ -1,11 +1,9 @@
-#include "amux/asyncmux.hh"
+#include "../asyncmux.hh"
 
-#include <algorithm>
 #include <fstream>
 
 namespace asyncmux {
 
-// FileSystemTier::FileSystemTier
 FileSystemTier::FileSystemTier(TierId id,
                                std::string name,
                                std::filesystem::path root_dir,
@@ -17,17 +15,14 @@ FileSystemTier::FileSystemTier(TierId id,
     std::filesystem::create_directories(root_dir_);
 }
 
-// FileSystemTier::id
 TierId FileSystemTier::id() const {
     return id_;
 }
 
-// FileSystemTier::name
 std::string FileSystemTier::name() const {
     return name_;
 }
 
-// FileSystemTier::full_path
 std::filesystem::path FileSystemTier::full_path(const std::string& relative_path) const {
     std::filesystem::path rel(relative_path);
     if (rel.is_absolute()) {
@@ -36,7 +31,6 @@ std::filesystem::path FileSystemTier::full_path(const std::string& relative_path
     return root_dir_ / rel;
 }
 
-// FileSystemTier::ensure_parent_dirs
 void FileSystemTier::ensure_parent_dirs(const std::filesystem::path& p) const {
     const auto parent = p.parent_path();
     if (!parent.empty()) {
@@ -44,14 +38,24 @@ void FileSystemTier::ensure_parent_dirs(const std::filesystem::path& p) const {
     }
 }
 
-// FileSystemTier::read_at
+std::shared_ptr<std::shared_mutex> FileSystemTier::lock_for_path(const std::filesystem::path& p) const {
+    const std::string key = p.lexically_normal().string();
+    std::lock_guard<std::mutex> guard(lock_table_mu_);
+    auto& entry = file_locks_[key];
+    if (!entry) {
+        entry = std::make_shared<std::shared_mutex>();
+    }
+    return entry;
+}
+
 cppcoro::task<IoBuffer> FileSystemTier::read_at(const std::string& relative_path,
                                                 uint64_t offset,
                                                 uint64_t size) {
     co_await pool_.schedule();
 
-    std::lock_guard lock(mu_);
     const auto path = full_path(relative_path);
+    const auto file_lock = lock_for_path(path);
+    std::shared_lock<std::shared_mutex> lock(*file_lock);
 
     std::vector<Byte> out(static_cast<size_t>(size), Byte{0});
 
@@ -65,7 +69,11 @@ cppcoro::task<IoBuffer> FileSystemTier::read_at(const std::string& relative_path
     }
 
     in.seekg(0, std::ios::end);
-    const auto file_size = static_cast<uint64_t>(in.tellg());
+    const auto end_pos = in.tellg();
+    if (end_pos < 0) {
+        throw IoError("read_at: failed to determine file size");
+    }
+    const auto file_size = static_cast<uint64_t>(end_pos);
 
     if (offset >= file_size) {
         co_return IoBuffer{std::move(out)};
@@ -75,22 +83,23 @@ cppcoro::task<IoBuffer> FileSystemTier::read_at(const std::string& relative_path
     in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
     in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(readable));
 
-    if (!in && !in.eof()) {
+    if (in.bad()) {
         throw IoError("read_at: failed during read");
     }
 
     co_return IoBuffer{std::move(out)};
 }
 
-// FileSystemTier::write_at
 cppcoro::task<void> FileSystemTier::write_at(const std::string& relative_path,
                                              uint64_t offset,
                                              std::span<const Byte> data) {
     co_await pool_.schedule();
 
-    std::lock_guard lock(mu_);
     const auto path = full_path(relative_path);
     ensure_parent_dirs(path);
+
+    const auto file_lock = lock_for_path(path);
+    std::unique_lock<std::shared_mutex> lock(*file_lock);
 
     std::fstream io(path, std::ios::binary | std::ios::in | std::ios::out);
     if (!io) {
@@ -109,6 +118,7 @@ cppcoro::task<void> FileSystemTier::write_at(const std::string& relative_path,
     io.seekp(static_cast<std::streamoff>(offset), std::ios::beg);
     io.write(reinterpret_cast<const char*>(data.data()),
              static_cast<std::streamsize>(data.size()));
+    io.flush();
 
     if (!io) {
         throw IoError("write_at: failed during write");
@@ -117,12 +127,13 @@ cppcoro::task<void> FileSystemTier::write_at(const std::string& relative_path,
     co_return;
 }
 
-// FileSystemTier::remove_file
 cppcoro::task<void> FileSystemTier::remove_file(const std::string& relative_path) {
     co_await pool_.schedule();
 
-    std::lock_guard lock(mu_);
     const auto path = full_path(relative_path);
+    const auto file_lock = lock_for_path(path);
+    std::unique_lock<std::shared_mutex> lock(*file_lock);
+
     std::error_code ec;
     std::filesystem::remove(path, ec);
     if (ec) {

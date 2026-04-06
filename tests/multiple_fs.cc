@@ -1,17 +1,23 @@
+#include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <iostream>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <sys/statfs.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include "amux/asyncmux.hh"
 #include "tests/utils.hh"
@@ -19,17 +25,14 @@
 #include <cppcoro/sync_wait.hpp>
 
 using asyncmux::AsyncMux;
-using asyncmux::BlockId;
 using asyncmux::BlockLocation;
 using asyncmux::Byte;
 using asyncmux::FileSystemTier;
 using asyncmux::IoBuffer;
 using asyncmux::MetadataStore;
 using asyncmux::MutablePlacementPolicy;
-using asyncmux::PlacementPolicy;
 using asyncmux::TierId;
 using asyncmux::TierRegistry;
-using asyncmux::WriteBlock;
 using asyncmux::kBlockSize;
 
 using cppcoro::static_thread_pool;
@@ -110,11 +113,11 @@ void reset_dir(const fs::path& root) {
     fs::remove_all(root, ec);
     fs::create_directories(root, ec);
     if (ec) {
-        throw std::runtime_error("failed to reset test directory");
+        throw std::runtime_error("failed to reset test directory: " + root.string());
     }
 }
 
-void mount_tmpfs_strict(const fs::path& root) {
+void mount_tmpfs(const fs::path& root) {
     force_unmount_if_mounted(root);
     reset_dir(root);
 
@@ -127,7 +130,7 @@ void mount_tmpfs_strict(const fs::path& root) {
     }
 }
 
-void mount_ext4_image_strict(const fs::path& image, const fs::path& root) {
+void mount_ext4_image(const fs::path& image, const fs::path& root) {
     force_unmount_if_mounted(root);
     reset_dir(root);
     remove_file_if_exists(image);
@@ -158,8 +161,17 @@ std::vector<BlockLocation> sorted_locs(MetadataStore& metadata,
     return locs;
 }
 
+void assert_non_overlapping(const std::vector<BlockLocation>& locs,
+                            const std::string& context) {
+    for (std::size_t i = 1; i < locs.size(); ++i) {
+        const auto prev_end = locs[i - 1].file_offset + locs[i - 1].size;
+        assert_true(prev_end <= locs[i].file_offset,
+                    context + ": metadata extents must not overlap");
+    }
+}
+
 struct Fixture {
-    static_thread_pool pool{4};
+    static_thread_pool pool{8};
     TierRegistry tiers;
     MetadataStore metadata;
     MutablePlacementPolicy placement{1};
@@ -167,13 +179,17 @@ struct Fixture {
 
     Fixture()
         : mux(tiers, metadata, placement, pool, false) {
+        if (::geteuid() != 0) {
+            throw std::runtime_error("multiple_fs tests must run as root to mount filesystems");
+        }
+
         ensure_dir(kHotRoot);
         ensure_dir(kWarmRoot);
         ensure_dir(kColdRoot);
 
-        mount_tmpfs_strict(kHotRoot);
-        mount_ext4_image_strict(kWarmImage, kWarmRoot);
-        mount_ext4_image_strict(kColdImage, kColdRoot);
+        mount_tmpfs(kHotRoot);
+        mount_ext4_image(kWarmImage, kWarmRoot);
+        mount_ext4_image(kColdImage, kColdRoot);
 
         tiers.add(std::make_unique<FileSystemTier>(1, "hot", kHotRoot, pool));
         tiers.add(std::make_unique<FileSystemTier>(2, "warm", kWarmRoot, pool));
@@ -228,6 +244,7 @@ task<void> test_placement_targets_expected_tier(Fixture& fx) {
     assert_true(fs::exists(kColdRoot / "cold_file"), "cold root should contain cold_file");
 
     fx.placement.set(1);
+    co_return;
 }
 
 task<void> test_multi_tier_fanout_read(Fixture& fx) {
@@ -244,6 +261,7 @@ task<void> test_multi_tier_fanout_read(Fixture& fx) {
 
     auto locs = sorted_locs(fx.metadata, "/fanout", 0, bytes.size());
     assert_true(locs.size() >= 3, "fanout payload should span at least three blocks");
+    assert_non_overlapping(locs, "fanout");
 
     co_await fx.mux.migrate(locs[0].block_id, 1, 2);
     co_await fx.mux.migrate(locs[1].block_id, 1, 3);
@@ -277,7 +295,7 @@ task<void> test_promote_restores_hot_tier(Fixture& fx) {
     assert_true(!locs.empty(), "promote payload should create block metadata");
 
     for (std::size_t i = 0; i < locs.size(); ++i) {
-        TierId dst = (i % 2 == 0) ? 2 : 3;
+        const TierId dst = (i % 2 == 0) ? 2 : 3;
         co_await fx.mux.migrate(locs[i].block_id, 1, dst);
     }
 
@@ -321,6 +339,7 @@ task<void> test_multiple_paths_across_tiers(Fixture& fx) {
     assert_true(fs::exists(kColdRoot / "group" / "three"), "cold root should contain /group/three");
 
     fx.placement.set(1);
+    co_return;
 }
 
 task<void> test_missing_file_zero_fill(Fixture& fx) {
@@ -331,6 +350,79 @@ task<void> test_missing_file_zero_fill(Fixture& fx) {
     }
 }
 
+task<void> test_overwrite_replaces_old_extents(Fixture& fx) {
+    fx.placement.set(1);
+    const std::string base((2 * kBlockSize) + 64, 'A');
+    auto base_bytes = to_bytes(base);
+    co_await fx.mux.write("/overwrite", 0,
+                          std::span<const Byte>(base_bytes.data(), base_bytes.size()));
+
+    fx.placement.set(2);
+    const std::string patch(700, 'B');
+    auto patch_bytes = to_bytes(patch);
+    const std::uint64_t patch_off = kBlockSize - 150;
+    co_await fx.mux.write("/overwrite", patch_off,
+                          std::span<const Byte>(patch_bytes.data(), patch_bytes.size()));
+
+    std::string expected = base;
+    expected.replace(static_cast<std::size_t>(patch_off), patch.size(), patch);
+
+    IoBuffer out = co_await fx.mux.read("/overwrite", 0, expected.size());
+    assert_eq(to_string(out), expected,
+              "overwrite should replace old bytes instead of leaving stale overlaps");
+
+    auto locs = sorted_locs(fx.metadata, "/overwrite", 0, expected.size());
+    assert_true(!locs.empty(), "overwrite should retain metadata");
+    assert_non_overlapping(locs, "overwrite");
+
+    for (const auto& loc : locs) {
+        const bool overlaps_patch = !(loc.file_offset + loc.size <= patch_off ||
+                                      loc.file_offset >= patch_off + patch.size());
+        if (overlaps_patch) {
+            assert_true(loc.tier_id == 2,
+                        "patched extents should now point at the destination tier of the overwrite");
+        }
+    }
+
+    co_return;
+}
+
+task<void> test_cross_tier_overwrite_and_followup_read(Fixture& fx) {
+    fx.placement.set(1);
+    std::string payload((3 * kBlockSize) + 32, 'q');
+    for (int i = 0; i < 26; ++i) {
+        payload[50 + i] = static_cast<char>('A' + i);
+        payload[kBlockSize + 50 + i] = static_cast<char>('a' + i);
+        payload[(2 * kBlockSize) + 5 + i] = static_cast<char>('0' + (i % 10));
+    }
+    auto payload_bytes = to_bytes(payload);
+    co_await fx.mux.write("/cross_overwrite", 0,
+                          std::span<const Byte>(payload_bytes.data(), payload_bytes.size()));
+
+    auto before = sorted_locs(fx.metadata, "/cross_overwrite", 0, payload_bytes.size());
+    assert_true(before.size() >= 3, "cross_overwrite should start with several extents");
+
+    co_await fx.mux.migrate(before[0].block_id, 1, 2);
+    co_await fx.mux.migrate(before[1].block_id, 1, 3);
+
+    fx.placement.set(2);
+    const std::string patch(kBlockSize + 333, 'Z');
+    auto patch_bytes = to_bytes(patch);
+    const std::uint64_t patch_off = kBlockSize - 100;
+    co_await fx.mux.write("/cross_overwrite", patch_off,
+                          std::span<const Byte>(patch_bytes.data(), patch_bytes.size()));
+
+    payload.replace(static_cast<std::size_t>(patch_off), patch.size(), patch);
+
+    IoBuffer out = co_await fx.mux.read("/cross_overwrite", 0, payload.size());
+    assert_eq(to_string(out), payload,
+              "read after cross-tier overwrite should reflect newest bytes across all tiers");
+
+    auto after = sorted_locs(fx.metadata, "/cross_overwrite", 0, payload.size());
+    assert_non_overlapping(after, "cross_overwrite");
+    co_return;
+}
+
 task<void> run_all(Fixture& fx) {
     co_await test_fs_types_are_expected(fx);
     co_await test_placement_targets_expected_tier(fx);
@@ -338,6 +430,8 @@ task<void> run_all(Fixture& fx) {
     co_await test_promote_restores_hot_tier(fx);
     co_await test_multiple_paths_across_tiers(fx);
     co_await test_missing_file_zero_fill(fx);
+    co_await test_overwrite_replaces_old_extents(fx);
+    co_await test_cross_tier_overwrite_and_followup_read(fx);
 }
 
 } // namespace

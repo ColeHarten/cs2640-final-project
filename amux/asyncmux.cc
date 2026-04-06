@@ -1,47 +1,38 @@
 #include "asyncmux.hh"
 
 #include <algorithm>
-#include <fstream>
+#include <iterator>
 
 namespace asyncmux {
 
-// IoBuffer::IoBuffer
 IoBuffer::IoBuffer() = default;
-
-// IoBuffer::IoBuffer
 IoBuffer::IoBuffer(size_t n) : data(n) {}
-
-// IoBuffer::IoBuffer
 IoBuffer::IoBuffer(std::vector<Byte> bytes) : data(std::move(bytes)) {}
 
-// IoBuffer::size
 size_t IoBuffer::size() const {
     return data.size();
 }
 
-// IoBuffer::bytes
 Byte* IoBuffer::bytes() {
     return data.data();
 }
 
-// IoBuffer::bytes
 const Byte* IoBuffer::bytes() const {
     return data.data();
 }
 
-// MetadataStore::lookup
 std::vector<BlockLocation> MetadataStore::lookup(const std::string& path,
                                                  uint64_t offset,
                                                  uint64_t size) const {
     std::shared_lock lock(mu_);
     auto it = file_map_.find(path);
-    if (it == file_map_.end()) {
+    if (it == file_map_.end() || size == 0) {
         return {};
     }
 
     std::vector<BlockLocation> out;
     const uint64_t end = offset + size;
-    for (const auto& loc : it->second) {
+    for (const auto& loc : it->second.extents) {
         const uint64_t loc_begin = loc.file_offset;
         const uint64_t loc_end = loc.file_offset + loc.size;
         if (loc_end <= offset || loc_begin >= end) {
@@ -56,83 +47,147 @@ std::vector<BlockLocation> MetadataStore::lookup(const std::string& path,
     return out;
 }
 
-// MetadataStore::update
+void MetadataStore::rebuild_block_index_locked(const std::string& path) {
+    auto file_it = file_map_.find(path);
+    if (file_it == file_map_.end()) {
+        return;
+    }
+
+    for (auto it = block_index_.begin(); it != block_index_.end();) {
+        if (it->second.path == path) {
+            it = block_index_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (const auto& loc : file_it->second.extents) {
+        block_index_[loc.block_id] = BlockIndexEntry{path, loc.file_offset, loc.size};
+    }
+}
+
 void MetadataStore::update(const std::string& path,
                            BlockId block_id,
                            TierId tier_id,
                            uint64_t file_offset,
                            uint64_t size) {
+    if (size == 0) {
+        return;
+    }
+
     std::unique_lock lock(mu_);
-    auto& vec = file_map_[path];
-    auto it = std::find_if(vec.begin(), vec.end(), [&](const BlockLocation& loc) {
-        return loc.block_id == block_id;
+    auto& file = file_map_[path];
+    const uint64_t new_begin = file_offset;
+    const uint64_t new_end = file_offset + size;
+
+    std::vector<BlockLocation> next;
+    next.reserve(file.extents.size() + 2);
+
+    for (const auto& loc : file.extents) {
+        const uint64_t old_begin = loc.file_offset;
+        const uint64_t old_end = loc.file_offset + loc.size;
+
+        if (old_end <= new_begin || old_begin >= new_end) {
+            next.push_back(loc);
+            continue;
+        }
+
+        if (old_begin < new_begin) {
+            next.push_back(BlockLocation{
+                loc.block_id,
+                loc.tier_id,
+                old_begin,
+                new_begin - old_begin,
+            });
+        }
+
+        if (old_end > new_end) {
+            next.push_back(BlockLocation{
+                loc.block_id,
+                loc.tier_id,
+                new_end,
+                old_end - new_end,
+            });
+        }
+    }
+
+    next.push_back(BlockLocation{block_id, tier_id, file_offset, size});
+    std::sort(next.begin(), next.end(), [](const BlockLocation& a, const BlockLocation& b) {
+        return a.file_offset < b.file_offset;
     });
 
-    if (it == vec.end()) {
-        vec.push_back(BlockLocation{block_id, tier_id, file_offset, size});
-    } else {
-        it->tier_id = tier_id;
-        it->file_offset = file_offset;
-        it->size = size;
-    }
+    file.extents = std::move(next);
+    ++file.version;
+    rebuild_block_index_locked(path);
 }
 
-// MetadataStore::update_block
 void MetadataStore::update_block(BlockId block_id, TierId new_tier) {
-    std::unique_lock lock(mu_);
-    for (auto& [_, vec] : file_map_) {
-        for (auto& loc : vec) {
-            if (loc.block_id == block_id) {
-                loc.tier_id = new_tier;
-                return;
-            }
-        }
-    }
-    throw IoError("unknown block in update_block()");
+    relocate_block(block_id, new_tier);
 }
 
-// MetadataStore::relocate_block
 void MetadataStore::relocate_block(BlockId block_id, TierId new_tier) {
     std::unique_lock lock(mu_);
-    for (auto& [_, vec] : file_map_) {
-        for (auto& loc : vec) {
-            if (loc.block_id == block_id) {
-                loc.tier_id = new_tier;
-                return;
-            }
+    auto idx = block_index_.find(block_id);
+    if (idx == block_index_.end()) {
+        throw IoError("unknown block in relocate_block()");
+    }
+
+    auto file_it = file_map_.find(idx->second.path);
+    if (file_it == file_map_.end()) {
+        throw IoError("corrupt metadata: missing file for block");
+    }
+
+    for (auto& loc : file_it->second.extents) {
+        if (loc.block_id == block_id) {
+            loc.tier_id = new_tier;
+            ++file_it->second.version;
+            return;
         }
     }
+
     throw IoError("unknown block in relocate_block()");
 }
 
-// MetadataStore::get_block
 LocatedBlock MetadataStore::get_block(BlockId block_id) const {
     std::shared_lock lock(mu_);
-    for (const auto& [path, vec] : file_map_) {
-        for (const auto& loc : vec) {
-            if (loc.block_id == block_id) {
-                return LocatedBlock{path, loc};
-            }
+    auto idx = block_index_.find(block_id);
+    if (idx == block_index_.end()) {
+        throw IoError("unknown block in get_block()");
+    }
+
+    auto file_it = file_map_.find(idx->second.path);
+    if (file_it == file_map_.end()) {
+        throw IoError("corrupt metadata: missing file for block");
+    }
+
+    for (const auto& loc : file_it->second.extents) {
+        if (loc.block_id == block_id) {
+            return LocatedBlock{idx->second.path, loc};
         }
     }
+
     throw IoError("unknown block in get_block()");
 }
 
-// MetadataStore::tier_of
 TierId MetadataStore::tier_of(BlockId block_id) const {
-    std::shared_lock lock(mu_);
-    for (const auto& [_, vec] : file_map_) {
-        for (const auto& loc : vec) {
-            if (loc.block_id == block_id) {
-                return loc.tier_id;
-            }
-        }
-    }
-    throw IoError("unknown block in tier_of()");
+    return get_block(block_id).location.tier_id;
 }
 
+uint64_t MetadataStore::version_of(const std::string& path) const {
+    std::shared_lock lock(mu_);
+    auto it = file_map_.find(path);
+    if (it == file_map_.end()) {
+        return 0;
+    }
+    return it->second.version;
+}
 
-// TierRegistry::add
+uint64_t MetadataStore::bump_version(const std::string& path) {
+    std::unique_lock lock(mu_);
+    auto& file = file_map_[path];
+    return ++file.version;
+}
+
 void TierRegistry::add(std::unique_ptr<Tier> tier) {
     auto [_, inserted] = tiers_.emplace(tier->id(), std::move(tier));
     if (!inserted) {
@@ -140,7 +195,6 @@ void TierRegistry::add(std::unique_ptr<Tier> tier) {
     }
 }
 
-// TierRegistry::get
 Tier& TierRegistry::get(TierId id) {
     auto it = tiers_.find(id);
     if (it == tiers_.end()) {
@@ -149,7 +203,6 @@ Tier& TierRegistry::get(TierId id) {
     return *it->second;
 }
 
-// TierRegistry::get
 const Tier& TierRegistry::get(TierId id) const {
     auto it = tiers_.find(id);
     if (it == tiers_.end()) {
@@ -158,21 +211,17 @@ const Tier& TierRegistry::get(TierId id) const {
     return *it->second;
 }
 
-// ConstantPlacementPolicy::ConstantPlacementPolicy
 ConstantPlacementPolicy::ConstantPlacementPolicy(TierId default_tier)
     : default_tier_(default_tier) {}
 
-// ConstantPlacementPolicy::choose_tier
 TierId ConstantPlacementPolicy::choose_tier(const WriteBlock&) {
     return default_tier_;
 }
 
-// BlockAllocator::next
 BlockId BlockAllocator::next() {
-    return next_id_++;
+    return next_id_.fetch_add(1, std::memory_order_relaxed);
 }
 
-// AsyncMux::AsyncMux
 AsyncMux::AsyncMux(TierRegistry& tiers,
                    MetadataStore& metadata,
                    PlacementPolicy& placement,
@@ -184,10 +233,13 @@ AsyncMux::AsyncMux(TierRegistry& tiers,
       pool_(pool),
       auto_migration_enabled_(auto_migration_enabled) {}
 
-// AsyncMux::read
 cppcoro::task<IoBuffer> AsyncMux::read(const std::string& path,
                                        uint64_t offset,
                                        uint64_t size) {
+    if (size == 0) {
+        co_return IoBuffer{};
+    }
+
     auto blocks = metadata_.lookup(path, offset, size);
     std::vector<cppcoro::task<IoBuffer>> tasks;
     std::vector<BlockLocation> overlaps;
@@ -216,52 +268,75 @@ cppcoro::task<IoBuffer> AsyncMux::read(const std::string& path,
     co_return assemble(overlaps, std::move(results), offset, size);
 }
 
-// AsyncMux::write
 cppcoro::task<void> AsyncMux::write(const std::string& path,
                                     uint64_t offset,
                                     std::span<const Byte> data) {
+    if (data.empty()) {
+        co_return;
+    }
+
     auto blocks = split(offset, data);
+    std::vector<PreparedWrite> prepared;
+    prepared.reserve(blocks.size());
 
     for (auto& block : blocks) {
-        const TierId tier_id = placement_.choose_tier(block);
-        Tier& tier = tiers_.get(tier_id);
+        prepared.push_back(PreparedWrite{std::move(block), placement_.choose_tier(block)});
+    }
 
-        co_await tier.write_at(path,
-                               block.file_offset,
-                               std::span<const Byte>(block.data.data(), block.data.size()));
+    std::vector<cppcoro::task<void>> tasks;
+    tasks.reserve(prepared.size());
+    for (const auto& item : prepared) {
+        Tier& tier = tiers_.get(item.tier_id);
+        tasks.emplace_back(tier.write_at(
+            path,
+            item.block.file_offset,
+            std::span<const Byte>(item.block.data.data(), item.block.data.size())));
+    }
 
+    co_await cppcoro::when_all(std::move(tasks));
+
+    for (const auto& item : prepared) {
         metadata_.update(path,
-                         block.block_id,
-                         tier_id,
-                         block.file_offset,
-                         block.data.size());
+                         item.block.block_id,
+                         item.tier_id,
+                         item.block.file_offset,
+                         item.block.data.size());
     }
 
     co_return;
 }
 
-// AsyncMux::migrate
 cppcoro::task<void> AsyncMux::migrate(BlockId block_id, TierId src_id, TierId dst_id) {
-    const LocatedBlock located = metadata_.get_block(block_id);
-    const auto& old = located.location;
+    constexpr int kMaxAttempts = 4;
 
-    if (old.tier_id != src_id) {
-        throw IoError("migrate: source tier does not match metadata");
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        const LocatedBlock located = metadata_.get_block(block_id);
+        const auto& old = located.location;
+
+        if (old.tier_id != src_id) {
+            throw IoError("migrate: source tier does not match metadata");
+        }
+
+        const uint64_t start_version = metadata_.version_of(located.path);
+        Tier& src_tier = tiers_.get(src_id);
+        Tier& dst_tier = tiers_.get(dst_id);
+
+        auto data = co_await src_tier.read_at(located.path, old.file_offset, old.size);
+        co_await dst_tier.write_at(located.path,
+                                   old.file_offset,
+                                   std::span<const Byte>(data.data.data(), data.data.size()));
+
+        if (metadata_.version_of(located.path) != start_version) {
+            continue;
+        }
+
+        metadata_.relocate_block(block_id, dst_id);
+        co_return;
     }
 
-    Tier& src_tier = tiers_.get(src_id);
-    Tier& dst_tier = tiers_.get(dst_id);
-
-    auto data = co_await src_tier.read_at(located.path, old.file_offset, old.size);
-    co_await dst_tier.write_at(located.path,
-                               old.file_offset,
-                               std::span<const Byte>(data.data.data(), data.data.size()));
-
-    metadata_.relocate_block(block_id, dst_id);
-    co_return;
+    throw IoError("migrate: failed due to concurrent modification");
 }
 
-// AsyncMux::promote
 cppcoro::task<void> AsyncMux::promote(BlockId block_id, TierId hot_tier) {
     const TierId current = metadata_.tier_of(block_id);
     if (current == hot_tier) {
@@ -270,7 +345,6 @@ cppcoro::task<void> AsyncMux::promote(BlockId block_id, TierId hot_tier) {
     co_await migrate(block_id, current, hot_tier);
 }
 
-// AsyncMux::split
 std::vector<WriteBlock> AsyncMux::split(uint64_t offset, std::span<const Byte> data) {
     std::vector<WriteBlock> out;
     size_t cursor = 0;
@@ -278,7 +352,7 @@ std::vector<WriteBlock> AsyncMux::split(uint64_t offset, std::span<const Byte> d
     while (cursor < data.size()) {
         const size_t n = std::min<size_t>(kBlockSize, data.size() - cursor);
         std::vector<Byte> chunk(n);
-        std::copy_n(data.begin() + cursor, n, chunk.begin());
+        std::copy_n(data.begin() + static_cast<std::ptrdiff_t>(cursor), n, chunk.begin());
 
         out.push_back(WriteBlock{
             .block_id = allocator_.next(),
@@ -291,7 +365,6 @@ std::vector<WriteBlock> AsyncMux::split(uint64_t offset, std::span<const Byte> d
     return out;
 }
 
-// AsyncMux::assemble
 IoBuffer AsyncMux::assemble(const std::vector<BlockLocation>& locations,
                             std::vector<IoBuffer> pieces,
                             uint64_t read_offset,
@@ -303,25 +376,25 @@ IoBuffer AsyncMux::assemble(const std::vector<BlockLocation>& locations,
         const auto& src = pieces[i].data;
 
         const size_t dst_offset = static_cast<size_t>(loc.file_offset - read_offset);
-        const size_t n = static_cast<size_t>(loc.size);
+        const size_t n = std::min(static_cast<size_t>(loc.size), src.size());
+        if (dst_offset > out.data.size() || n > out.data.size() - dst_offset) {
+            throw IoError("assemble: invalid extent bounds");
+        }
 
-        std::copy_n(src.begin(), n, out.data.begin() + dst_offset);
+        std::copy_n(src.begin(), n, out.data.begin() + static_cast<std::ptrdiff_t>(dst_offset));
     }
 
     return out;
 }
 
-// FuseFrontend::FuseFrontend
 FuseFrontend::FuseFrontend(AsyncMux& mux) : mux_(mux) {}
 
-// FuseFrontend::on_read
 cppcoro::task<IoBuffer> FuseFrontend::on_read(const std::string& path,
                                               uint64_t offset,
                                               uint64_t size) {
     co_return co_await mux_.read(path, offset, size);
 }
 
-// FuseFrontend::on_write
 cppcoro::task<void> FuseFrontend::on_write(const std::string& path,
                                            uint64_t offset,
                                            std::span<const Byte> data) {
