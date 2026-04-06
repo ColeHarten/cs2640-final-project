@@ -16,7 +16,7 @@ endif
 # all: docker-run
 
 configure:
-	@echo "Local macOS configure is disabled. Use make docker-build or make docker-run [TEST=...]."
+	@echo "Local macOS configure is disabled. Use make build or make run [TEST=...]."
 	@false
 
 build:

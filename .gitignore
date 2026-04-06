@@ -40,6 +40,6 @@
 # debug information files
 *.dwo
 
-# Build directory (recursive)
+# Build directory
 build/
 
