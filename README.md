@@ -15,10 +15,15 @@ AsyncMux is an asynchronous multi-tier storage mux built on top of `cppcoro`. It
 ```text
 .
 ├── amux/
-│   ├── asyncmux.hh            # Public API and core types
-│   ├── asyncmux.cc            # Metadata, tier routing, read/write, migration logic
+│   ├── asyncmux.hh            # Umbrella public API header
+│   ├── asyncmux.cc            # AsyncMux orchestration and FuseFrontend
+│   ├── metadata_store.hh/.cc   # In-memory extent and block index store
+│   ├── placement_policy.hh/.cc # Tier selection policies
+│   ├── tier.hh/.cc             # Tier interface and registry
+│   ├── block_allocator.hh      # Block id generator
 │   └── tiers/
-│       └── filesystem_tier.cc # Filesystem-backed tier implementation
+│       ├── filesystem_tier.hh  # Filesystem-backed tier interface
+│       └── filesystem_tier.cc  # Filesystem-backed tier implementation
 ├── tests/
 │   ├── single_fs.cc           # Single-tier correctness tests
 │   ├── multiple_fs.cc         # Multi-tier mount-based correctness tests
@@ -82,10 +87,12 @@ make clean
 
 ## Implementation Notes
 
-- `AsyncMux` is the main orchestration layer. It accepts a tier registry, metadata store, placement policy, and thread pool.
-- `FileSystemTier` stores file contents on a backing filesystem rooted at a tier directory.
-- `MetadataStore` tracks per-file extents and block-to-path lookups.
-- Placement is controlled by a policy object, which lets tests steer writes to specific tiers.
+- `AsyncMux` is the main orchestration layer. It lives in [amux/asyncmux.cc](amux/asyncmux.cc) and is declared by the umbrella header [amux/asyncmux.hh](amux/asyncmux.hh).
+- Shared types and helpers live in [amux/asyncmux.hh](amux/asyncmux.hh) and [amux/asyncmux.cc](amux/asyncmux.cc).
+- `MetadataStore` tracks per-file extents and block-to-path lookups in [amux/metadata_store.hh](amux/metadata_store.hh) and [amux/metadata_store.cc](amux/metadata_store.cc).
+- Placement is controlled by policies in [amux/placement_policy.hh](amux/placement_policy.hh) and [amux/placement_policy.cc](amux/placement_policy.cc), which lets tests steer writes to specific tiers.
+- `Tier` and `TierRegistry` live in [amux/tier.hh](amux/tier.hh) and [amux/tier.cc](amux/tier.cc).
+- `FileSystemTier` stores file contents on a backing filesystem rooted at a tier directory, with its declaration in [amux/tiers/filesystem_tier.hh](amux/tiers/filesystem_tier.hh) and implementation in [amux/tiers/filesystem_tier.cc](amux/tiers/filesystem_tier.cc).
 
 ## Troubleshooting
 

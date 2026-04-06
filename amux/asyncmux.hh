@@ -1,23 +1,16 @@
 #ifndef ASYNC_MUX_HH
 #define ASYNC_MUX_HH
 
+#include <cppcoro/static_thread_pool.hpp>
 #include <cppcoro/task.hpp>
 #include <cppcoro/when_all.hpp>
-#include <cppcoro/static_thread_pool.hpp>
 
-#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
-#include <memory>
-#include <mutex>
-#include <shared_mutex>
-#include <span>
 #include <stdexcept>
+#include <span>
 #include <string>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 
 namespace asyncmux {
@@ -65,147 +58,23 @@ struct LocatedBlock {
     BlockLocation location;
 };
 
-class MetadataStore {
-public:
-    std::vector<BlockLocation> lookup(const std::string& path,
-                                      uint64_t offset,
-                                      uint64_t size) const;
-
-    void update(const std::string& path,
-                BlockId block_id,
-                TierId tier_id,
-                uint64_t file_offset,
-                uint64_t size);
-
-    void update_block(BlockId block_id, TierId new_tier);
-
-    void relocate_block(BlockId block_id, TierId new_tier);
-
-    LocatedBlock get_block(BlockId block_id) const;
-
-    TierId tier_of(BlockId block_id) const;
-
-    uint64_t version_of(const std::string& path) const;
-    uint64_t bump_version(const std::string& path);
-
-private:
-    struct FileEntry {
-        std::vector<BlockLocation> extents;
-        uint64_t version = 0;
-    };
-
-    struct BlockIndexEntry {
-        std::string path;
-        uint64_t file_offset = 0;
-        uint64_t size = 0;
-    };
-
-    void rebuild_block_index_locked(const std::string& path);
-
-    mutable std::shared_mutex mu_;
-    std::unordered_map<std::string, FileEntry> file_map_;
-    std::unordered_map<BlockId, BlockIndexEntry> block_index_;
-};
-
-class Tier {
-public:
-    virtual ~Tier() = default;
-
-    virtual TierId id() const = 0;
-    virtual std::string name() const = 0;
-
-    virtual cppcoro::task<IoBuffer> read_at(const std::string& relative_path,
-                                            uint64_t offset,
-                                            uint64_t size) = 0;
-
-    virtual cppcoro::task<void> write_at(const std::string& relative_path,
-                                         uint64_t offset,
-                                         std::span<const Byte> data) = 0;
-
-    virtual cppcoro::task<void> remove_file(const std::string& relative_path) = 0;
-};
-
-class FileSystemTier final : public Tier {
-public:
-    FileSystemTier(TierId id,
-                   std::string name,
-                   std::filesystem::path root_dir,
-                   cppcoro::static_thread_pool& pool);
-
-    TierId id() const override;
-    std::string name() const override;
-
-    cppcoro::task<IoBuffer> read_at(const std::string& relative_path,
-                                    uint64_t offset,
-                                    uint64_t size) override;
-
-    cppcoro::task<void> write_at(const std::string& relative_path,
-                                 uint64_t offset,
-                                 std::span<const Byte> data) override;
-
-    cppcoro::task<void> remove_file(const std::string& relative_path) override;
-
-private:
-    std::filesystem::path full_path(const std::string& relative_path) const;
-    void ensure_parent_dirs(const std::filesystem::path& p) const;
-    std::shared_ptr<std::shared_mutex> lock_for_path(const std::filesystem::path& p) const;
-
-    TierId id_;
-    std::string name_;
-    std::filesystem::path root_dir_;
-    cppcoro::static_thread_pool& pool_;
-    mutable std::mutex lock_table_mu_;
-    mutable std::unordered_map<std::string, std::shared_ptr<std::shared_mutex>> file_locks_;
-};
-
-class TierRegistry {
-public:
-    void add(std::unique_ptr<Tier> tier);
-    Tier& get(TierId id);
-    const Tier& get(TierId id) const;
-
-private:
-    std::unordered_map<TierId, std::unique_ptr<Tier>> tiers_;
-};
-
-class PlacementPolicy {
-public:
-    virtual ~PlacementPolicy() = default;
-    virtual TierId choose_tier(const WriteBlock& block) = 0;
-};
-
-class ConstantPlacementPolicy final : public PlacementPolicy {
-public:
-    explicit ConstantPlacementPolicy(TierId default_tier);
-    TierId choose_tier(const WriteBlock&) override;
-
-private:
-    TierId default_tier_;
-};
-
-class MutablePlacementPolicy final : public PlacementPolicy {
-public:
-    explicit MutablePlacementPolicy(TierId initial_tier) : tier_(initial_tier) {}
-
-    void set(TierId tier) {
-        tier_ = tier;
-    }
-
-    TierId choose_tier(const WriteBlock&) override {
-        return tier_;
-    }
-
-private:
-    TierId tier_;
-};
-
 class BlockAllocator {
 public:
-    BlockId next();
+    BlockId next() {
+        return next_id_.fetch_add(1, std::memory_order_relaxed);
+    }
 
 private:
     std::atomic<BlockId> next_id_{1};
 };
+
+class MetadataStore;
+class PlacementPolicy;
+class TierRegistry;
+
+} // namespace asyncmux
+
+namespace asyncmux {
 
 class AsyncMux {
 public:
@@ -265,5 +134,9 @@ private:
 };
 
 } // namespace asyncmux
+
+#include "metadata_store.hh"
+#include "placement_policy.hh"
+#include "tier.hh"
 
 #endif

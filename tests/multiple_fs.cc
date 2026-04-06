@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "amux/asyncmux.hh"
+#include "amux/tiers/filesystem_tier.hh"
 #include "tests/utils.hh"
 
 #include <cppcoro/sync_wait.hpp>

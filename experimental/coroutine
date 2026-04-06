@@ -1,0 +1,13 @@
+#pragma once
+
+#include <coroutine>
+
+namespace std::experimental {
+
+using std::coroutine_handle;
+using std::coroutine_traits;
+using std::noop_coroutine;
+using std::suspend_always;
+using std::suspend_never;
+
+} // namespace std::experimental
