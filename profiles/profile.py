@@ -213,44 +213,46 @@ echo "Bootstrap complete on $(hostname)"
 '''
 
 def setup_tier_script(tier_idx, tmpfs_gb):
-    block_dev = "/dev/sdb"
-    mount_base = f"/tier{tier_idx}"
-    data_mount = f"{mount_base}/data"
-    tmpfs_mount = f"{mount_base}/tmpfs"
-    block_fs_marker = f"{mount_base}/.blockstore_ready"
+        block_dev = "/dev/sdb"
+        mount_base = "/tier{}".format(tier_idx)
+        data_mount = "{}/data".format(mount_base)
+        tmpfs_mount = "{}/tmpfs".format(mount_base)
+        block_fs_marker = "{}/.blockstore_ready".format(mount_base)
 
-    tmpfs_part = ""
-    if tmpfs_gb > 0:
-        tmpfs_part = f'''
+        tmpfs_part = ""
+        if tmpfs_gb > 0:
+                tmpfs_part = '''
 sudo mkdir -p {tmpfs_mount}
 if ! mountpoint -q {tmpfs_mount}; then
-  sudo mount -t tmpfs -o size={tmpfs_gb}G tmpfs {tmpfs_mount}
+    sudo mount -t tmpfs -o size={tmpfs_gb}G tmpfs {tmpfs_mount}
 fi
 if ! grep -q "{tmpfs_mount} " /etc/fstab; then
-  echo "tmpfs {tmpfs_mount} tmpfs size={tmpfs_gb}G 0 0" | sudo tee -a /etc/fstab
+    echo "tmpfs {tmpfs_mount} tmpfs size={tmpfs_gb}G 0 0" | sudo tee -a /etc/fstab
 fi
-'''
+'''.format(tmpfs_mount=tmpfs_mount, tmpfs_gb=tmpfs_gb)
 
-    return f'''
+        tmpfs_conf_mount = tmpfs_mount if tmpfs_gb > 0 else ""
+
+        return '''
 set -euxo pipefail
 
 sudo mkdir -p {mount_base}
 sudo mkdir -p {data_mount}
 
 if [ -b {block_dev} ]; then
-  if ! sudo blkid {block_dev}; then
-    sudo mkfs.ext4 -F {block_dev}
-  fi
+    if ! sudo blkid {block_dev}; then
+        sudo mkfs.ext4 -F {block_dev}
+    fi
 
-  if ! mountpoint -q {data_mount}; then
-    sudo mount {block_dev} {data_mount}
-  fi
+    if ! mountpoint -q {data_mount}; then
+        sudo mount {block_dev} {data_mount}
+    fi
 
-  if ! grep -q "{data_mount} " /etc/fstab; then
-    echo "{block_dev} {data_mount} ext4 defaults 0 0" | sudo tee -a /etc/fstab
-  fi
+    if ! grep -q "{data_mount} " /etc/fstab; then
+        echo "{block_dev} {data_mount} ext4 defaults 0 0" | sudo tee -a /etc/fstab
+    fi
 
-  sudo touch {block_fs_marker}
+    sudo touch {block_fs_marker}
 fi
 
 {tmpfs_part}
@@ -261,14 +263,22 @@ sudo mkdir -p {mount_base}/meta
 
 echo "tier_index={tier_idx}" | sudo tee {mount_base}/tier.conf
 echo "data_mount={data_mount}" | sudo tee -a {mount_base}/tier.conf
-echo "tmpfs_mount={tmpfs_mount if tmpfs_gb > 0 else ''}" | sudo tee -a {mount_base}/tier.conf
+echo "tmpfs_mount={tmpfs_conf_mount}" | sudo tee -a {mount_base}/tier.conf
 
 echo "Tier {tier_idx} configured on $(hostname)"
 mount | grep "{mount_base}" || true
-'''
+'''.format(
+                mount_base=mount_base,
+                data_mount=data_mount,
+                block_dev=block_dev,
+                block_fs_marker=block_fs_marker,
+                tmpfs_part=tmpfs_part,
+                tier_idx=tier_idx,
+                tmpfs_conf_mount=tmpfs_conf_mount,
+        )
 
 def setup_controller_script(num_tiers):
-    return f'''
+    return '''
 set -euxo pipefail
 
 mkdir -p /users/$USER/mux-config
@@ -288,7 +298,7 @@ EOF
 chmod +x /users/$USER/mux-scripts/show-topology.sh
 
 echo "Controller configured on $(hostname)"
-'''
+'''.format(num_tiers=num_tiers)
 
 def setup_client_script():
     return r'''
@@ -320,8 +330,8 @@ def make_tier_node(name, tier_idx, blockstore_gb, tmpfs_gb):
     apply_node_defaults(node)
 
     if blockstore_gb > 0:
-        bs = node.Blockstore(f"{name}bs", "/unused")
-        bs.size = f"{blockstore_gb}GB"
+        bs = node.Blockstore("{}bs".format(name), "/unused")
+        bs.size = "{}GB".format(blockstore_gb)
 
     add_common_services(node, setup_tier_script(tier_idx, tmpfs_gb))
     return node
@@ -350,12 +360,12 @@ lan.bandwidth = params.lan_bandwidth
 tier_nodes = []
 for i in range(params.num_tiers):
     tnode = make_tier_node(
-        f"tier{i}",
+        "tier{}".format(i),
         i,
         tier_block_sizes[i],
         tier_tmpfs_sizes[i]
     )
-    iface = tnode.addInterface(f"if-tier{i}")
+    iface = tnode.addInterface("if-tier{}".format(i))
     lan.addInterface(iface)
     tier_nodes.append(tnode)
 
@@ -398,7 +408,7 @@ else:
 #
 # Optional notes file on controller/client
 #
-topology_note = f'''
+topology_note = '''
 set -euxo pipefail
 cat > /users/$USER/README-CLOUDLAB-TOPOLOGY.txt <<'EOF'
 CloudLab multitier testbed
@@ -406,7 +416,7 @@ CloudLab multitier testbed
 Roles:
 - controller: orchestration / metadata / policy
 - client: workload generation
-- tier0..tier{params.num_tiers - 1}: storage tiers
+- tier0..tier{num_tiers_max}: storage tiers
 
 Expected per-tier mounts:
 - /tierN/data   : blockstore-backed ext4
@@ -417,7 +427,7 @@ This profile is intended to support:
 - future Mux-like multi-filesystem experiments
 - eventual distributed Mux or RPC-based storage composition
 EOF
-'''
+'''.format(num_tiers_max=params.num_tiers - 1)
 controller_node.addService(pg.Execute(shell="bash", command=topology_note))
 
 pc.printRequestRSpec(request)
