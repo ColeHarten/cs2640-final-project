@@ -60,7 +60,7 @@ pc.defineParameter(
     "separate_client",
     "Use a dedicated client node",
     portal.ParameterType.BOOLEAN,
-    False
+    True
 )
 
 pc.defineParameter(
