@@ -1,7 +1,7 @@
 BUILD_DIR := build
 SAN ?= 0
 TEST ?= all
-CXX ?= /usr/bin/clang++-12
+override CXX := /usr/bin/clang++-12
 
 TEST_BINS := $(basename $(notdir $(wildcard tests/*.cc)))
 
