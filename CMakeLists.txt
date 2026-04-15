@@ -12,6 +12,8 @@ if(NOT EXISTS "${CPPCORO_ROOT}/include/cppcoro/task.hpp")
     message(FATAL_ERROR "cppcoro headers not found. Initialize submodule: git submodule update --init --recursive")
 endif()
 
+find_package(Threads REQUIRED)
+
 add_library(cppcoro_static_thread_pool STATIC
     ${CPPCORO_ROOT}/lib/auto_reset_event.cpp
     ${CPPCORO_ROOT}/lib/lightweight_manual_reset_event.cpp
@@ -23,10 +25,31 @@ add_library(cppcoro_static_thread_pool STATIC
 target_include_directories(cppcoro_static_thread_pool
     PUBLIC
         ${CPPCORO_ROOT}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-find_package(Threads REQUIRED)
-target_link_libraries(cppcoro_static_thread_pool PUBLIC Threads::Threads)
+target_link_libraries(cppcoro_static_thread_pool
+    PUBLIC
+        Threads::Threads
+)
+
+#
+# Old cppcoro + experimental coroutines setup
+#
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(cppcoro_static_thread_pool PUBLIC
+        -stdlib=libc++
+        -fcoroutines-ts
+    )
+    target_link_options(cppcoro_static_thread_pool PUBLIC
+        -stdlib=libc++
+    )
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    message(FATAL_ERROR
+        "This project is configured for old cppcoro with <experimental/coroutine>. "
+        "Use clang++-12 (or similar old Clang with libc++) instead of g++."
+    )
+endif()
 
 function(add_asyncmux_test target source_file)
     add_executable(${target}
@@ -41,17 +64,35 @@ function(add_asyncmux_test target source_file)
     target_include_directories(${target}
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CPPCORO_ROOT}/include
     )
 
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        target_compile_options(${target} PRIVATE
+            -stdlib=libc++
+            -fcoroutines-ts
+        )
+        target_link_options(${target} PRIVATE
+            -stdlib=libc++
+        )
+    endif()
+
     if(ENABLE_SANITIZERS)
-        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+        target_compile_options(${target} PRIVATE
+            -fsanitize=address,undefined
+            -fno-omit-frame-pointer
+        )
+        target_link_options(${target} PRIVATE
+            -fsanitize=address,undefined
+        )
     endif()
 
     target_link_libraries(${target} PRIVATE cppcoro_static_thread_pool)
 endfunction()
 
-file(GLOB TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cc)
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cc
+)
 
 foreach(test_source ${TEST_SOURCES})
     get_filename_component(test_target ${test_source} NAME_WE)
