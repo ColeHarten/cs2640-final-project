@@ -23,6 +23,7 @@
 #include "amux/tiers/filesystem_tier.hh"
 #include "tests/utils.hh"
 
+#include <cppcoro/task.hpp>
 #include <cppcoro/sync_wait.hpp>
 
 using asyncmux::AsyncMux;
