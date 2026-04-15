@@ -16,7 +16,6 @@
 #include <vector>
 
 #include <sys/statfs.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include "amux/asyncmux.hh"
@@ -50,33 +49,18 @@ static_assert(
 #else
     false,
 #endif
-    "multiple_fs.cc requires Linux for mount-based filesystem compatibility tests");
+    "multiple_fs.cc requires Linux");
 
-const fs::path kHotRoot = "/tmp/asyncmux_hot";
-const fs::path kWarmRoot = "/tmp/asyncmux_warm";
-const fs::path kColdRoot = "/tmp/asyncmux_cold";
-
-const fs::path kWarmImage = "/tmp/asyncmux_warm.img";
-const fs::path kColdImage = "/tmp/asyncmux_cold.img";
-
-constexpr std::uint64_t kExt4ImageSizeMB = 128;
+const fs::path kHotRoot  = "/tier0/tmpfs";
+const fs::path kWarmRoot = "/tier1/data";
+const fs::path kColdRoot = "/tier2/data";
 
 constexpr long kTmpfsMagic = 0x01021994;
-constexpr long kExt4Magic = 0xEF53;
+constexpr long kExt4Magic  = 0xEF53;
+constexpr long kXfsMagic   = 0x58465342;
 
-bool command_succeeds(const std::string& command) {
-    const int rc = std::system(command.c_str());
-    if (rc == -1) {
-        return false;
-    }
-    return WIFEXITED(rc) && WEXITSTATUS(rc) == 0;
-}
-
-void require_command(const std::string& command) {
-    if (!command_succeeds(command)) {
-        throw std::runtime_error("required command failed: " + command);
-    }
-}
+// Change this if tier2/data is ext4 in your profile.
+constexpr long kColdMagic = kXfsMagic;
 
 long fs_magic_for(const fs::path& root) {
     struct statfs stat_info {};
@@ -87,66 +71,45 @@ long fs_magic_for(const fs::path& root) {
 }
 
 bool is_mountpoint(const fs::path& root) {
-    return command_succeeds("mountpoint -q " + root.string());
+    std::error_code ec;
+    if (!fs::exists(root, ec) || ec) {
+        return false;
+    }
+
+    struct stat root_stat {};
+    struct stat parent_stat {};
+
+    if (::stat(root.c_str(), &root_stat) != 0) {
+        return false;
+    }
+
+    const fs::path parent = root.parent_path();
+    if (parent.empty()) {
+        return true;
+    }
+
+    if (::stat(parent.c_str(), &parent_stat) != 0) {
+        return false;
+    }
+
+    return (root_stat.st_dev != parent_stat.st_dev) ||
+           (root_stat.st_ino == parent_stat.st_ino);
 }
 
-void ensure_dir(const fs::path& root) {
+void ensure_dir_exists(const fs::path& root) {
     std::error_code ec;
-    fs::create_directories(root, ec);
-    if (ec) {
-        throw std::runtime_error("failed to create directory: " + root.string());
+    if (!fs::exists(root, ec) || ec) {
+        throw std::runtime_error("expected tier path does not exist: " + root.string());
+    }
+    if (!fs::is_directory(root, ec) || ec) {
+        throw std::runtime_error("expected tier path is not a directory: " + root.string());
     }
 }
 
-void force_unmount_if_mounted(const fs::path& root) {
-    if (is_mountpoint(root)) {
-        require_command("umount " + root.string());
-    }
-}
-
-void remove_file_if_exists(const fs::path& p) {
-    std::error_code ec;
-    fs::remove(p, ec);
-}
-
-void reset_dir(const fs::path& root) {
-    std::error_code ec;
-    fs::remove_all(root, ec);
-    fs::create_directories(root, ec);
-    if (ec) {
-        throw std::runtime_error("failed to reset test directory: " + root.string());
-    }
-}
-
-void mount_tmpfs(const fs::path& root) {
-    force_unmount_if_mounted(root);
-    reset_dir(root);
-
-    require_command("mount -t tmpfs -o size=512M tmpfs " + root.string());
+void ensure_tier_ready(const fs::path& root, const std::string& name) {
+    ensure_dir_exists(root);
     if (!is_mountpoint(root)) {
-        throw std::runtime_error("tmpfs mount did not produce a mountpoint: " + root.string());
-    }
-    if (fs_magic_for(root) != kTmpfsMagic) {
-        throw std::runtime_error("mounted hot tier is not tmpfs: " + root.string());
-    }
-}
-
-void mount_ext4_image(const fs::path& image, const fs::path& root) {
-    force_unmount_if_mounted(root);
-    reset_dir(root);
-    remove_file_if_exists(image);
-
-    require_command("dd if=/dev/zero of=" + image.string() +
-                    " bs=1M count=" + std::to_string(kExt4ImageSizeMB) +
-                    " status=none");
-    require_command("mkfs.ext4 -F -q " + image.string());
-    require_command("mount -o loop " + image.string() + " " + root.string());
-
-    if (!is_mountpoint(root)) {
-        throw std::runtime_error("ext4 mount did not produce a mountpoint: " + root.string());
-    }
-    if (fs_magic_for(root) != kExt4Magic) {
-        throw std::runtime_error("mounted tier is not ext4: " + root.string());
+        throw std::runtime_error(name + " tier is not mounted: " + root.string());
     }
 }
 
@@ -171,6 +134,33 @@ void assert_non_overlapping(const std::vector<BlockLocation>& locs,
     }
 }
 
+void cleanup_test_artifacts() {
+    std::error_code ec;
+    fs::remove(kHotRoot / "hot_file", ec);
+    fs::remove(kWarmRoot / "warm_file", ec);
+    fs::remove(kColdRoot / "cold_file", ec);
+
+    fs::remove(kHotRoot / "fanout", ec);
+    fs::remove(kWarmRoot / "fanout", ec);
+    fs::remove(kColdRoot / "fanout", ec);
+
+    fs::remove(kHotRoot / "promote", ec);
+    fs::remove(kWarmRoot / "promote", ec);
+    fs::remove(kColdRoot / "promote", ec);
+
+    fs::remove(kHotRoot / "overwrite", ec);
+    fs::remove(kWarmRoot / "overwrite", ec);
+    fs::remove(kColdRoot / "overwrite", ec);
+
+    fs::remove(kHotRoot / "cross_overwrite", ec);
+    fs::remove(kWarmRoot / "cross_overwrite", ec);
+    fs::remove(kColdRoot / "cross_overwrite", ec);
+
+    fs::remove_all(kHotRoot / "group", ec);
+    fs::remove_all(kWarmRoot / "group", ec);
+    fs::remove_all(kColdRoot / "group", ec);
+}
+
 struct Fixture {
     static_thread_pool pool{8};
     TierRegistry tiers;
@@ -180,17 +170,11 @@ struct Fixture {
 
     Fixture()
         : mux(tiers, metadata, placement, pool, false) {
-        if (::geteuid() != 0) {
-            throw std::runtime_error("multiple_fs tests must run as root to mount filesystems");
-        }
+        ensure_tier_ready(kHotRoot, "hot");
+        ensure_tier_ready(kWarmRoot, "warm");
+        ensure_tier_ready(kColdRoot, "cold");
 
-        ensure_dir(kHotRoot);
-        ensure_dir(kWarmRoot);
-        ensure_dir(kColdRoot);
-
-        mount_tmpfs(kHotRoot);
-        mount_ext4_image(kWarmImage, kWarmRoot);
-        mount_ext4_image(kColdImage, kColdRoot);
+        cleanup_test_artifacts();
 
         tiers.add(std::make_unique<FileSystemTier>(1, "hot", kHotRoot, pool));
         tiers.add(std::make_unique<FileSystemTier>(2, "warm", kWarmRoot, pool));
@@ -198,11 +182,7 @@ struct Fixture {
     }
 
     ~Fixture() {
-        std::system(("umount " + kHotRoot.string()).c_str());
-        std::system(("umount " + kWarmRoot.string()).c_str());
-        std::system(("umount " + kColdRoot.string()).c_str());
-        remove_file_if_exists(kWarmImage);
-        remove_file_if_exists(kColdImage);
+        cleanup_test_artifacts();
     }
 };
 
@@ -211,8 +191,8 @@ task<void> test_fs_types_are_expected(Fixture&) {
                 "hot tier must be tmpfs");
     assert_true(fs_magic_for(kWarmRoot) == kExt4Magic,
                 "warm tier must be ext4");
-    assert_true(fs_magic_for(kColdRoot) == kExt4Magic,
-                "cold tier must be ext4");
+    assert_true(fs_magic_for(kColdRoot) == kColdMagic,
+                "cold tier must have expected filesystem type");
     co_return;
 }
 
