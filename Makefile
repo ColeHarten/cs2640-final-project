@@ -16,20 +16,33 @@ endif
 # all: docker-run
 
 configure:
-	@echo "Local macOS configure is disabled. Use make build or make run [TEST=...]."
-	@false
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=RelWithDebInfo $(CMAKE_SAN_FLAG)
 
-build:
+build: configure
+	cmake --build $(BUILD_DIR) --parallel
+
+run: build
+ifeq ($(TEST),all)
+	@status=0; for t in $(TEST_BINS); do ./$(BUILD_DIR)/$$t || { status=$$?; break; }; done; if [ $$status -eq 0 ]; then printf "\033[1;32mAll tests passed.\033[0m\n"; fi; exit $$status
+else
+	./$(BUILD_DIR)/$(TEST)
+endif
+
+docker-build:
 	docker build --platform $(DOCKER_PLATFORM) -t $(IMAGE) .
 
-run: 
+docker-run:
 ifeq ($(TEST),all)
 	docker run --rm --platform $(DOCKER_PLATFORM) --privileged $(IMAGE) /bin/sh -lc 'status=0; for t in $(TEST_BINS); do /app/build/$$t || { status=$$?; break; }; done; if [ $$status -eq 0 ]; then printf "\033[1;32mAll tests passed.\033[0m\n"; fi; exit $$status'
 else
 	docker run --rm --platform $(DOCKER_PLATFORM) --privileged $(IMAGE) /app/build/$(TEST)
 endif
 
+docker: docker-run
+
 clean:
 	rm -rf $(BUILD_DIR)
 
 rebuild: clean build
+
+docker-rebuild: docker-build
