@@ -63,7 +63,7 @@ pc.defineParameter(
     "repo_url",
     "Optional git repo URL to clone",
     portal.ParameterType.STRING,
-    ""
+    "https://github.com/ColeHarten/cs2640-final-project"
 )
 
 pc.defineParameter(
