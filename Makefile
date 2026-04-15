@@ -3,6 +3,10 @@ SAN ?= 0
 IMAGE ?= asyncmux
 DOCKER_PLATFORM ?= linux/amd64
 TEST ?= all
+
+CC ?= /usr/bin/clang-12
+CXX ?= /usr/bin/clang++-12
+
 TEST_BINS := $(basename $(notdir $(wildcard tests/*.cc)))
 
 ifeq ($(SAN),1)
@@ -11,12 +15,19 @@ else
 CMAKE_SAN_FLAG := -DENABLE_SANITIZERS=OFF
 endif
 
+CMAKE_FLAGS := \
+	-DCMAKE_BUILD_TYPE=RelWithDebInfo \
+	$(CMAKE_SAN_FLAG) \
+	-DCMAKE_C_COMPILER=$(CC) \
+	-DCMAKE_CXX_COMPILER=$(CXX)
+
 .PHONY: all configure build run clean rebuild docker docker-build docker-run docker-rebuild
 
 # all: docker-run
 
 configure:
-	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=RelWithDebInfo $(CMAKE_SAN_FLAG)
+	rm -rf $(BUILD_DIR)
+	cmake -S . -B $(BUILD_DIR) $(CMAKE_FLAGS)
 
 build: configure
 	cmake --build $(BUILD_DIR) --parallel
