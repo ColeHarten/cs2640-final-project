@@ -143,7 +143,7 @@ def apply_node_defaults(node):
         node.hardware_type = params.hardware_type.strip()
     node.disk_image = params.disk_image
 
-def install_script():
+def combined_boot_script():
     repo_logic = r'''
 if [ -n "{repo_url}" ]; then
   cd /users/$USER
@@ -161,39 +161,43 @@ set -euxo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-sudo apt-get update
-sudo apt-get install -y \
-  build-essential \
-  cmake \
-  pkg-config \
-  git \
-  clang \
-  gdb \
-  make \
-  fio \
-  jq \
-  python3 \
-  python3-pip \
-  fuse3 \
-  libfuse3-dev \
-  xfsprogs \
-  e2fsprogs \
-  rsync \
-  net-tools \
-  iperf3 \
-  util-linux
+if [ "{install_deps}" = "True" ]; then
+  sudo apt-get update
+  sudo apt-get install -y \
+    build-essential \
+    cmake \
+    pkg-config \
+    git \
+    clang \
+    gdb \
+    make \
+    fio \
+    jq \
+    python3 \
+    python3-pip \
+    fuse3 \
+    libfuse3-dev \
+    xfsprogs \
+    e2fsprogs \
+    rsync \
+    net-tools \
+    iperf3 \
+    util-linux
+fi
+
+command -v mount >/dev/null 2>&1 || {{ echo "mount missing"; exit 1; }}
+command -v findmnt >/dev/null 2>&1 || {{ echo "findmnt missing"; exit 1; }}
+command -v blkid >/dev/null 2>&1 || {{ echo "blkid missing"; exit 1; }}
+command -v mkfs.ext4 >/dev/null 2>&1 || {{ echo "mkfs.ext4 missing"; exit 1; }}
+command -v mkfs.xfs >/dev/null 2>&1 || {{ echo "mkfs.xfs missing"; exit 1; }}
 
 mkdir -p /users/$USER/results
 mkdir -p /users/$USER/bin
+mkdir -p /users/$USER/mux-config
+mkdir -p /users/$USER/mux-scripts
+mkdir -p /users/$USER/workloads
 
-''' + repo_logic + r'''
-
-echo "Bootstrap complete on $(hostname)"
-'''
-
-def single_node_setup_script():
-    return r'''
-set -euxo pipefail
+{repo_logic}
 
 WORKSPACE_DIR="{workspace_dir}"
 NUM_TIERS="{num_tiers}"
@@ -210,6 +214,28 @@ TIER3_FS="{tier3_fs}"
 
 sudo mkdir -p "$WORKSPACE_DIR"
 
+remove_fstab_entry() {{
+  local mountpoint="$1"
+  local escaped
+  escaped="$(printf '%s\n' "$mountpoint" | sed 's/[.[\*^$()+?{{|]/\\&/g; s/\//\\\//g')"
+  sudo sed -i "\|[[:space:]]$escaped[[:space:]]|d" /etc/fstab
+}}
+
+wait_for_mountpoint() {{
+  local mountpoint="$1"
+  local tries=10
+  local i=0
+  while [ "$i" -lt "$tries" ]; do
+    if mountpoint -q "$mountpoint"; then
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  echo "ERROR: timed out waiting for mountpoint $mountpoint"
+  return 1
+}}
+
 setup_tmpfs_tier() {{
   local mountpoint="$1"
   local size_gb="$2"
@@ -220,11 +246,13 @@ setup_tmpfs_tier() {{
     sudo umount "$mountpoint" || true
   fi
 
+  remove_fstab_entry "$mountpoint"
+
   if [ "$size_gb" -gt 0 ]; then
     sudo mount -t tmpfs -o size="${{size_gb}}G" tmpfs "$mountpoint"
-    if ! grep -q " $mountpoint " /etc/fstab; then
-      echo "tmpfs $mountpoint tmpfs size=${{size_gb}}G 0 0" | sudo tee -a /etc/fstab
-    fi
+    wait_for_mountpoint "$mountpoint"
+    echo "tmpfs $mountpoint tmpfs rw,nosuid,nodev,size=${{size_gb}}G 0 0" | sudo tee -a /etc/fstab >/dev/null
+    findmnt "$mountpoint"
   fi
 }}
 
@@ -246,28 +274,43 @@ setup_loop_fs_tier() {{
     sudo umount "$data_mount" || true
   fi
 
+  remove_fstab_entry "$data_mount"
+
   if [ ! -f "$image_path" ]; then
+    sudo truncate -s "${{size_gb}}G" "$image_path"
+  else
     sudo truncate -s "${{size_gb}}G" "$image_path"
   fi
 
-  if [ "$fs_type" = "ext4" ]; then
-    if ! sudo blkid "$image_path" >/dev/null 2>&1; then
+  local current_type=""
+  if sudo blkid -o value -s TYPE "$image_path" >/dev/null 2>&1; then
+    current_type="$(sudo blkid -o value -s TYPE "$image_path")"
+  fi
+
+  if [ "$current_type" != "$fs_type" ]; then
+    echo "Formatting $image_path as $fs_type (was: ${{current_type:-none}})"
+    if [ "$fs_type" = "ext4" ]; then
       sudo mkfs.ext4 -F "$image_path"
-    fi
-  elif [ "$fs_type" = "xfs" ]; then
-    if ! sudo blkid "$image_path" >/dev/null 2>&1; then
+    elif [ "$fs_type" = "xfs" ]; then
       sudo mkfs.xfs -f "$image_path"
+    else
+      echo "Unsupported filesystem type: $fs_type"
+      exit 1
     fi
-  else
-    echo "Unsupported filesystem type: $fs_type"
+  fi
+
+  sudo mount -t "$fs_type" -o loop "$image_path" "$data_mount"
+  wait_for_mountpoint "$data_mount"
+
+  local detected_type
+  detected_type="$(findmnt -n -o FSTYPE --target "$data_mount")"
+  if [ "$detected_type" != "$fs_type" ]; then
+    echo "ERROR: mounted $data_mount as $detected_type but expected $fs_type"
     exit 1
   fi
 
-  sudo mount -o loop "$image_path" "$data_mount"
-
-  if ! grep -q " $data_mount " /etc/fstab; then
-    echo "$image_path $data_mount $fs_type loop 0 0" | sudo tee -a /etc/fstab
-  fi
+  echo "$image_path $data_mount $fs_type loop,rw,nosuid,nodev 0 0" | sudo tee -a /etc/fstab >/dev/null
+  findmnt "$data_mount"
 }}
 
 write_tier_conf() {{
@@ -278,7 +321,7 @@ write_tier_conf() {{
   local image_path="$5"
   local tmpfs_mount="$6"
 
-  cat <<EOF | sudo tee "${{mount_base}}/tier.conf"
+  cat <<EOF | sudo tee "${{mount_base}}/tier.conf" >/dev/null
 tier_index=${{tier_idx}}
 data_mount=${{data_mount}}
 fs_type=${{fs_type}}
@@ -287,14 +330,15 @@ tmpfs_mount=${{tmpfs_mount}}
 EOF
 }}
 
+sudo mkdir -p /tier0 /tier1 /tier2 /tier3
+sudo mkdir -p /tier0/logs /tier0/cache /tier0/meta
+sudo mkdir -p /tier1/logs /tier1/cache /tier1/meta
+sudo mkdir -p /tier2/logs /tier2/cache /tier2/meta
+sudo mkdir -p /tier3/logs /tier3/cache /tier3/meta
+
 #
 # Tier0: tmpfs tier (optional)
 #
-sudo mkdir -p /tier0
-sudo mkdir -p /tier0/logs
-sudo mkdir -p /tier0/cache
-sudo mkdir -p /tier0/meta
-
 if [ "$TIER0_TMPFS_GB" -gt 0 ]; then
   setup_tmpfs_tier /tier0/tmpfs "$TIER0_TMPFS_GB"
   write_tier_conf 0 /tier0 "" "tmpfs" "" "/tier0/tmpfs"
@@ -326,14 +370,6 @@ if [ "$NUM_TIERS" -ge 4 ]; then
   write_tier_conf 3 /tier3 /tier3/data "$TIER3_FS" "$WORKSPACE_DIR/tier3.img" ""
 fi
 
-#
-# Controller/client directories
-#
-mkdir -p /users/$USER/mux-config
-mkdir -p /users/$USER/mux-scripts
-mkdir -p /users/$USER/workloads
-mkdir -p /users/$USER/results
-
 cat > /users/$USER/mux-config/topology.env <<EOF
 NUM_TIERS=$NUM_TIERS
 TIER0_TMPFS=/tier0/tmpfs
@@ -343,6 +379,7 @@ TIER3_DATA=/tier3/data
 TIER1_FS=$TIER1_FS
 TIER2_FS=$TIER2_FS
 TIER3_FS=$TIER3_FS
+WORKSPACE_DIR=$WORKSPACE_DIR
 EOF
 
 cat > /users/$USER/mux-scripts/show-topology.sh <<'EOF'
@@ -353,10 +390,41 @@ echo
 echo "Mounted tiers:"
 mount | grep '/tier' || true
 echo
+echo "findmnt:"
+findmnt /tier0/tmpfs || true
+findmnt /tier1/data || true
+findmnt /tier2/data || true
+findmnt /tier3/data || true
+echo
 echo "Tier configs:"
 find /tier0 /tier1 /tier2 /tier3 -name tier.conf 2>/dev/null -print -exec cat {{}} \;
 EOF
 chmod +x /users/$USER/mux-scripts/show-topology.sh
+
+cat > /users/$USER/mux-scripts/debug-mounts.sh <<EOF
+#!/bin/bash
+set -euo pipefail
+echo "=== mount ==="
+mount | grep /tier || true
+echo
+echo "=== findmnt ==="
+findmnt /tier0/tmpfs || true
+findmnt /tier1/data || true
+findmnt /tier2/data || true
+findmnt /tier3/data || true
+echo
+echo "=== statfs ==="
+stat -f -c '%n %T %t' /tier0/tmpfs || true
+stat -f -c '%n %T %t' /tier1/data || true
+stat -f -c '%n %T %t' /tier2/data || true
+stat -f -c '%n %T %t' /tier3/data || true
+echo
+echo "=== blkid ==="
+sudo blkid "$WORKSPACE_DIR/tier1.img" || true
+sudo blkid "$WORKSPACE_DIR/tier2.img" || true
+sudo blkid "$WORKSPACE_DIR/tier3.img" || true
+EOF
+chmod +x /users/$USER/mux-scripts/debug-mounts.sh
 
 cat > /users/$USER/workloads/smoke.sh <<'EOF'
 #!/bin/bash
@@ -365,6 +433,10 @@ echo "Single-node smoke test from $(hostname)"
 cmake --version
 fio --version || true
 mount | grep '/tier' || true
+findmnt /tier0/tmpfs || true
+findmnt /tier1/data || true
+findmnt /tier2/data || true
+findmnt /tier3/data || true
 EOF
 chmod +x /users/$USER/workloads/smoke.sh
 
@@ -384,8 +456,19 @@ This profile is intended to support:
 EOF
 
 echo "Single-node multi-filesystem setup complete on $(hostname)"
+echo "==== FINAL TIER STATUS ===="
 mount | grep '/tier' || true
+findmnt /tier0/tmpfs || true
+findmnt /tier1/data || true
+findmnt /tier2/data || true
+findmnt /tier3/data || true
+stat -f -c '%n %T %t' /tier0/tmpfs || true
+stat -f -c '%n %T %t' /tier1/data || true
+stat -f -c '%n %T %t' /tier2/data || true
+stat -f -c '%n %T %t' /tier3/data || true
 '''.format(
+        install_deps=params.install_deps,
+        repo_logic=repo_logic,
         workspace_dir=params.workspace_dir.replace('"', '\\"'),
         num_tiers=params.num_tiers,
         tier0_tmpfs_gb=params.tier0_tmpfs_gb,
@@ -398,9 +481,7 @@ mount | grep '/tier' || true
     )
 
 def add_common_services(node):
-    if params.install_deps:
-        node.addService(pg.Execute(shell="bash", command=install_script()))
-    node.addService(pg.Execute(shell="bash", command=single_node_setup_script()))
+    node.addService(pg.Execute(shell="bash", command=combined_boot_script()))
 
 #
 # Build topology

@@ -7,12 +7,14 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <sys/stat.h>
@@ -23,8 +25,9 @@
 #include "amux/tiers/filesystem_tier.hh"
 #include "tests/utils.hh"
 
-#include <cppcoro/task.hpp>
+#include <cppcoro/static_thread_pool.hpp>
 #include <cppcoro/sync_wait.hpp>
+#include <cppcoro/task.hpp>
 
 using asyncmux::AsyncMux;
 using asyncmux::BlockLocation;
@@ -58,11 +61,21 @@ const fs::path kWarmRoot = "/tier1/data";
 const fs::path kColdRoot = "/tier2/data";
 
 constexpr long kTmpfsMagic = 0x01021994;
-constexpr long kExt4Magic  = 0xEF53;
+constexpr long kExtMagic   = 0xEF53;
 constexpr long kXfsMagic   = 0x58465342;
 
-// Change this if tier2/data is ext4 in your profile.
-constexpr long kColdMagic = kXfsMagic;
+long expected_magic_for_fs(const std::string& fs_name) {
+    if (fs_name == "tmpfs") {
+        return kTmpfsMagic;
+    }
+    if (fs_name == "ext4") {
+        return kExtMagic;
+    }
+    if (fs_name == "xfs") {
+        return kXfsMagic;
+    }
+    throw std::runtime_error("unknown filesystem type in topology: " + fs_name);
+}
 
 long fs_magic_for(const fs::path& root) {
     struct statfs stat_info {};
@@ -108,11 +121,51 @@ void ensure_dir_exists(const fs::path& root) {
     }
 }
 
+void wait_for_mount(const fs::path& root, const std::string& name) {
+    for (int i = 0; i < 30; ++i) {
+        std::error_code ec;
+        if (fs::exists(root, ec) && !ec && is_mountpoint(root)) {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    throw std::runtime_error("timed out waiting for " + name + " tier mount: " + root.string());
+}
+
 void ensure_tier_ready(const fs::path& root, const std::string& name) {
     ensure_dir_exists(root);
+
+    std::cerr << "Checking " << name << " tier at " << root << "\n";
+    std::cerr << "  exists: " << fs::exists(root) << "\n";
+    std::cerr << "  is_dir: " << fs::is_directory(root) << "\n";
+    std::cerr << "  is_mountpoint: " << is_mountpoint(root) << "\n";
+
     if (!is_mountpoint(root)) {
         throw std::runtime_error(name + " tier is not mounted: " + root.string());
     }
+
+    std::cerr << "  fs_magic: 0x" << std::hex << fs_magic_for(root) << std::dec << "\n";
+}
+
+std::unordered_map<std::string, std::string> read_env_file(const fs::path& path) {
+    std::ifstream in(path);
+    if (!in) {
+        throw std::runtime_error("failed to open topology file: " + path.string());
+    }
+
+    std::unordered_map<std::string, std::string> out;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        const auto pos = line.find('=');
+        if (pos == std::string::npos) {
+            continue;
+        }
+        out[line.substr(0, pos)] = line.substr(pos + 1);
+    }
+    return out;
 }
 
 std::vector<BlockLocation> sorted_locs(MetadataStore& metadata,
@@ -170,8 +223,35 @@ struct Fixture {
     MutablePlacementPolicy placement{1};
     AsyncMux mux;
 
+    std::string warm_fs;
+    std::string cold_fs;
+
     Fixture()
         : mux(tiers, metadata, placement, pool, false) {
+        const char* user = std::getenv("USER");
+        if (!user) {
+            throw std::runtime_error("USER is not set");
+        }
+
+        const fs::path topo =
+            fs::path("/users") / user / "mux-config" / "topology.env";
+        const auto env = read_env_file(topo);
+
+        auto get_required = [&](const std::string& key) -> std::string {
+            const auto it = env.find(key);
+            if (it == env.end() || it->second.empty()) {
+                throw std::runtime_error("missing required key in topology.env: " + key);
+            }
+            return it->second;
+        };
+
+        warm_fs = get_required("TIER1_FS");
+        cold_fs = get_required("TIER2_FS");
+
+        wait_for_mount(kHotRoot, "hot");
+        wait_for_mount(kWarmRoot, "warm");
+        wait_for_mount(kColdRoot, "cold");
+
         ensure_tier_ready(kHotRoot, "hot");
         ensure_tier_ready(kWarmRoot, "warm");
         ensure_tier_ready(kColdRoot, "cold");
@@ -188,12 +268,12 @@ struct Fixture {
     }
 };
 
-task<void> test_fs_types_are_expected(Fixture&) {
+task<void> test_fs_types_are_expected(Fixture& fx) {
     assert_true(fs_magic_for(kHotRoot) == kTmpfsMagic,
                 "hot tier must be tmpfs");
-    assert_true(fs_magic_for(kWarmRoot) == kExt4Magic,
-                "warm tier must be ext4");
-    assert_true(fs_magic_for(kColdRoot) == kColdMagic,
+    assert_true(fs_magic_for(kWarmRoot) == expected_magic_for_fs(fx.warm_fs),
+                "warm tier must have expected filesystem type");
+    assert_true(fs_magic_for(kColdRoot) == expected_magic_for_fs(fx.cold_fs),
                 "cold tier must have expected filesystem type");
     co_return;
 }
