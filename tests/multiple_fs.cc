@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 
+#include <sys/stat.h>
 #include <sys/statfs.h>
 #include <unistd.h>
 
