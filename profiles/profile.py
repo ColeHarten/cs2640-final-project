@@ -137,21 +137,21 @@ pc.defineParameter(
     "tier1_tmpfs_gb",
     "Tier1 tmpfs size in GB (0 disables tmpfs)",
     portal.ParameterType.INTEGER,
-    50
+    0
 )
 
 pc.defineParameter(
     "tier2_tmpfs_gb",
     "Tier2 tmpfs size in GB (0 disables tmpfs)",
     portal.ParameterType.INTEGER,
-    100
+    0
 )
 
 pc.defineParameter(
     "tier3_tmpfs_gb",
     "Tier3 tmpfs size in GB (0 disables tmpfs)",
     portal.ParameterType.INTEGER,
-    200
+    0
 )
 
 params = pc.bindParameters()
