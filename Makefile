@@ -47,9 +47,6 @@ clean:
 
 rebuild: clean build
 
-clean:
-	rm -rf $(BUILD_DIR)
-
 rebuild: clean build
 
 docker-build:
