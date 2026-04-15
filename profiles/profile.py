@@ -53,14 +53,14 @@ pc.defineParameter(
     "separate_controller",
     "Use a dedicated controller node",
     portal.ParameterType.BOOLEAN,
-    False
+    True
 )
 
 pc.defineParameter(
     "separate_client",
     "Use a dedicated client node",
     portal.ParameterType.BOOLEAN,
-    True
+    False
 )
 
 pc.defineParameter(
