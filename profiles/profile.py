@@ -345,9 +345,6 @@ sudo mkdir -p /tier1/logs /tier1/cache /tier1/meta
 sudo mkdir -p /tier2/logs /tier2/cache /tier2/meta
 sudo mkdir -p /tier3/logs /tier3/cache /tier3/meta
 
-#
-# Tier0: tmpfs tier (optional)
-#
 if [ "$TIER0_TMPFS_GB" -gt 0 ]; then
   setup_tmpfs_tier /tier0/tmpfs "$TIER0_TMPFS_GB"
   write_tier_conf 0 /tier0 "" "tmpfs" "" "/tier0/tmpfs"
@@ -355,25 +352,16 @@ else
   write_tier_conf 0 /tier0 "" "disabled" "" ""
 fi
 
-#
-# Tier1
-#
 if [ "$NUM_TIERS" -ge 2 ]; then
   setup_loop_fs_tier /tier1 "$WORKSPACE_DIR/tier1.img" "$TIER1_SIZE_GB" "$TIER1_FS"
   write_tier_conf 1 /tier1 /tier1/data "$TIER1_FS" "$WORKSPACE_DIR/tier1.img" ""
 fi
 
-#
-# Tier2
-#
 if [ "$NUM_TIERS" -ge 3 ]; then
   setup_loop_fs_tier /tier2 "$WORKSPACE_DIR/tier2.img" "$TIER2_SIZE_GB" "$TIER2_FS"
   write_tier_conf 2 /tier2 /tier2/data "$TIER2_FS" "$WORKSPACE_DIR/tier2.img" ""
 fi
 
-#
-# Tier3
-#
 if [ "$NUM_TIERS" -ge 4 ]; then
   setup_loop_fs_tier /tier3 "$WORKSPACE_DIR/tier3.img" "$TIER3_SIZE_GB" "$TIER3_FS"
   write_tier_conf 3 /tier3 /tier3/data "$TIER3_FS" "$WORKSPACE_DIR/tier3.img" ""
@@ -491,10 +479,6 @@ stat -f -c '%n %T %t' /tier3/data || true
 
 def add_common_services(node):
     node.addService(pg.Execute(shell="bash", command=combined_boot_script()))
-
-#
-# Build topology
-#
 
 node = request.RawPC("muxnode")
 apply_node_defaults(node)
