@@ -156,7 +156,7 @@ fi
         repo_branch=params.repo_branch.replace('"', '\\"')
     )
 
-    return r'''
+    return r'''#!/usr/bin/env bash
 set -euxo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
@@ -190,6 +190,7 @@ command -v findmnt >/dev/null 2>&1 || {{ echo "findmnt missing"; exit 1; }}
 command -v blkid >/dev/null 2>&1 || {{ echo "blkid missing"; exit 1; }}
 command -v mkfs.ext4 >/dev/null 2>&1 || {{ echo "mkfs.ext4 missing"; exit 1; }}
 command -v mkfs.xfs >/dev/null 2>&1 || {{ echo "mkfs.xfs missing"; exit 1; }}
+command -v losetup >/dev/null 2>&1 || {{ echo "losetup missing"; exit 1; }}
 
 mkdir -p /users/$USER/results
 mkdir -p /users/$USER/bin
@@ -216,9 +217,7 @@ sudo mkdir -p "$WORKSPACE_DIR"
 
 remove_fstab_entry() {{
   local mountpoint="$1"
-  local escaped
-  escaped="$(printf '%s\n' "$mountpoint" | sed 's/[.[\*^$()+?{{|]/\\&/g; s/\//\\\//g')"
-  sudo sed -i "\|[[:space:]]$escaped[[:space:]]|d" /etc/fstab
+  sudo sed -i "\|[[:space:]]$mountpoint[[:space:]]|d" /etc/fstab
 }}
 
 wait_for_mountpoint() {{
@@ -263,6 +262,8 @@ setup_loop_fs_tier() {{
   local fs_type="$4"
 
   local data_mount="${{mount_base}}/data"
+  local loopdev=""
+  local current_type=""
 
   sudo mkdir -p "$mount_base"
   sudo mkdir -p "$data_mount"
@@ -276,41 +277,49 @@ setup_loop_fs_tier() {{
 
   remove_fstab_entry "$data_mount"
 
-  if [ ! -f "$image_path" ]; then
-    sudo truncate -s "${{size_gb}}G" "$image_path"
-  else
-    sudo truncate -s "${{size_gb}}G" "$image_path"
-  fi
+  sudo mkdir -p "$(dirname "$image_path")"
+  sudo truncate -s "${{size_gb}}G" "$image_path"
 
-  local current_type=""
-  if sudo blkid -o value -s TYPE "$image_path" >/dev/null 2>&1; then
-    current_type="$(sudo blkid -o value -s TYPE "$image_path")"
+  loopdev="$(sudo losetup --find --show "$image_path")"
+
+  if sudo blkid -o value -s TYPE "$loopdev" >/dev/null 2>&1; then
+    current_type="$(sudo blkid -o value -s TYPE "$loopdev")"
   fi
 
   if [ "$current_type" != "$fs_type" ]; then
-    echo "Formatting $image_path as $fs_type (was: ${{current_type:-none}})"
+    echo "Formatting $loopdev as $fs_type (was: ${{current_type:-none}})"
     if [ "$fs_type" = "ext4" ]; then
-      sudo mkfs.ext4 -F "$image_path"
+      sudo mkfs.ext4 -F "$loopdev"
     elif [ "$fs_type" = "xfs" ]; then
-      sudo mkfs.xfs -f "$image_path"
+      sudo mkfs.xfs -f "$loopdev"
     else
       echo "Unsupported filesystem type: $fs_type"
+      sudo losetup -d "$loopdev" || true
       exit 1
     fi
   fi
 
-  sudo mount -t "$fs_type" -o loop "$image_path" "$data_mount"
+  sudo mount -t "$fs_type" "$loopdev" "$data_mount"
   wait_for_mountpoint "$data_mount"
 
   local detected_type
   detected_type="$(findmnt -n -o FSTYPE --target "$data_mount")"
   if [ "$detected_type" != "$fs_type" ]; then
     echo "ERROR: mounted $data_mount as $detected_type but expected $fs_type"
+    sudo umount "$data_mount" || true
+    sudo losetup -d "$loopdev" || true
     exit 1
   fi
 
   echo "$image_path $data_mount $fs_type loop,rw,nosuid,nodev 0 0" | sudo tee -a /etc/fstab >/dev/null
-  findmnt "$data_mount"
+
+  echo "=== mounted $data_mount ==="
+  findmnt "$data_mount" || true
+  mount | grep "$data_mount" || true
+  stat -f -c '%n %T %t' "$data_mount" || true
+  sudo blkid "$image_path" || true
+
+  sudo losetup -d "$loopdev"
 }}
 
 write_tier_conf() {{
@@ -383,7 +392,7 @@ WORKSPACE_DIR=$WORKSPACE_DIR
 EOF
 
 cat > /users/$USER/mux-scripts/show-topology.sh <<'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 echo "Node: $(hostname)"
 echo
@@ -402,7 +411,7 @@ EOF
 chmod +x /users/$USER/mux-scripts/show-topology.sh
 
 cat > /users/$USER/mux-scripts/debug-mounts.sh <<EOF
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 echo "=== mount ==="
 mount | grep /tier || true
@@ -427,7 +436,7 @@ EOF
 chmod +x /users/$USER/mux-scripts/debug-mounts.sh
 
 cat > /users/$USER/workloads/smoke.sh <<'EOF'
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 echo "Single-node smoke test from $(hostname)"
 cmake --version
