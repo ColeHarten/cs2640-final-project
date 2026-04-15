@@ -1,10 +1,6 @@
 BUILD_DIR := build
 SAN ?= 0
-IMAGE ?= asyncmux
-DOCKER_PLATFORM ?= linux/amd64
 TEST ?= all
-
-CC ?= /usr/bin/clang-12
 CXX ?= /usr/bin/clang++-12
 
 TEST_BINS := $(basename $(notdir $(wildcard tests/*.cc)))
@@ -18,12 +14,11 @@ endif
 CMAKE_FLAGS := \
 	-DCMAKE_BUILD_TYPE=RelWithDebInfo \
 	$(CMAKE_SAN_FLAG) \
-	-DCMAKE_C_COMPILER=$(CC) \
 	-DCMAKE_CXX_COMPILER=$(CXX)
 
-.PHONY: all configure build run clean rebuild docker docker-build docker-run docker-rebuild
+.PHONY: all configure build run clean rebuild
 
-# all: docker-run
+all: build
 
 configure:
 	rm -rf $(BUILD_DIR)
@@ -34,10 +29,28 @@ build: configure
 
 run: build
 ifeq ($(TEST),all)
-	@status=0; for t in $(TEST_BINS); do ./$(BUILD_DIR)/$$t || { status=$$?; break; }; done; if [ $$status -eq 0 ]; then printf "\033[1;32mAll tests passed.\033[0m\n"; fi; exit $$status
+	@status=0; \
+	for t in $(TEST_BINS); do \
+		echo "Running $$t"; \
+		./$(BUILD_DIR)/$$t || { status=$$?; break; }; \
+	done; \
+	if [ $$status -eq 0 ]; then \
+		printf "\033[1;32mAll tests passed.\033[0m\n"; \
+	fi; \
+	exit $$status
 else
 	./$(BUILD_DIR)/$(TEST)
 endif
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+rebuild: clean build
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+rebuild: clean build
 
 docker-build:
 	docker build --platform $(DOCKER_PLATFORM) -t $(IMAGE) .
@@ -50,10 +63,5 @@ else
 endif
 
 docker: docker-run
-
-clean:
-	rm -rf $(BUILD_DIR)
-
-rebuild: clean build
 
 docker-rebuild: docker-build

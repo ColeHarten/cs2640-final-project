@@ -9,10 +9,29 @@ option(ENABLE_SANITIZERS "Enable Address/Undefined sanitizers" OFF)
 
 set(CPPCORO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cppcoro" CACHE PATH "Path to cppcoro source")
 if(NOT EXISTS "${CPPCORO_ROOT}/include/cppcoro/task.hpp")
-    message(FATAL_ERROR "cppcoro headers not found. Initialize submodule: git submodule update --init --recursive")
+    message(FATAL_ERROR
+        "cppcoro headers not found. Initialize submodule: git submodule update --init --recursive"
+    )
 endif()
 
 find_package(Threads REQUIRED)
+
+#
+# This project is pinned to old cppcoro, which expects <experimental/coroutine>.
+# On Linux, that means old Clang + libc++.
+#
+if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR
+        "This project requires Clang for old cppcoro with <experimental/coroutine>. "
+        "Run via the provided Makefile (make build / make run), which selects clang++-12."
+    )
+endif()
+
+if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
+    message(FATAL_ERROR
+        "This project requires clang++ version 12 or newer in the old experimental-coroutine configuration."
+    )
+endif()
 
 add_library(cppcoro_static_thread_pool STATIC
     ${CPPCORO_ROOT}/lib/auto_reset_event.cpp
@@ -28,28 +47,21 @@ target_include_directories(cppcoro_static_thread_pool
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+target_compile_options(cppcoro_static_thread_pool
+    PUBLIC
+        -stdlib=libc++
+        -fcoroutines-ts
+)
+
+target_link_options(cppcoro_static_thread_pool
+    PUBLIC
+        -stdlib=libc++
+)
+
 target_link_libraries(cppcoro_static_thread_pool
     PUBLIC
         Threads::Threads
 )
-
-#
-# Old cppcoro + experimental coroutines setup
-#
-if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(cppcoro_static_thread_pool PUBLIC
-        -stdlib=libc++
-        -fcoroutines-ts
-    )
-    target_link_options(cppcoro_static_thread_pool PUBLIC
-        -stdlib=libc++
-    )
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(FATAL_ERROR
-        "This project is configured for old cppcoro with <experimental/coroutine>. "
-        "Use clang++-12 (or similar old Clang with libc++) instead of g++."
-    )
-endif()
 
 function(add_asyncmux_test target source_file)
     add_executable(${target}
@@ -67,27 +79,33 @@ function(add_asyncmux_test target source_file)
             ${CPPCORO_ROOT}/include
     )
 
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        target_compile_options(${target} PRIVATE
+    target_compile_options(${target}
+        PRIVATE
             -stdlib=libc++
             -fcoroutines-ts
-        )
-        target_link_options(${target} PRIVATE
+    )
+
+    target_link_options(${target}
+        PRIVATE
             -stdlib=libc++
-        )
-    endif()
+    )
 
     if(ENABLE_SANITIZERS)
-        target_compile_options(${target} PRIVATE
-            -fsanitize=address,undefined
-            -fno-omit-frame-pointer
+        target_compile_options(${target}
+            PRIVATE
+                -fsanitize=address,undefined
+                -fno-omit-frame-pointer
         )
-        target_link_options(${target} PRIVATE
-            -fsanitize=address,undefined
+        target_link_options(${target}
+            PRIVATE
+                -fsanitize=address,undefined
         )
     endif()
 
-    target_link_libraries(${target} PRIVATE cppcoro_static_thread_pool)
+    target_link_libraries(${target}
+        PRIVATE
+            cppcoro_static_thread_pool
+    )
 endfunction()
 
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS
