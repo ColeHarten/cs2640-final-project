@@ -70,7 +70,7 @@ cppcoro::task<IoBuffer> AsyncMux::read(const std::string& path,
 
 cppcoro::task<void> AsyncMux::write(const std::string& path,
                                     uint64_t offset,
-                                    std::span<const Byte> data) {
+                                    asyncmux::span<const Byte> data) {
     if (data.empty()) {
         co_return;
     }
@@ -90,7 +90,7 @@ cppcoro::task<void> AsyncMux::write(const std::string& path,
         tasks.emplace_back(tier.write_at(
             path,
             item.block.file_offset,
-            std::span<const Byte>(item.block.data.data(), item.block.data.size())));
+            asyncmux::span<const Byte>(item.block.data.data(), item.block.data.size())));
     }
 
     co_await cppcoro::when_all(std::move(tasks));
@@ -124,7 +124,7 @@ cppcoro::task<void> AsyncMux::migrate(BlockId block_id, TierId src_id, TierId ds
         auto data = co_await src_tier.read_at(located.path, old.file_offset, old.size);
         co_await dst_tier.write_at(located.path,
                                    old.file_offset,
-                                   std::span<const Byte>(data.data.data(), data.data.size()));
+                                   asyncmux::span<const Byte>(data.data.data(), data.data.size()));
 
         if (metadata_.version_of(located.path) != start_version) {
             continue;
@@ -145,7 +145,7 @@ cppcoro::task<void> AsyncMux::promote(BlockId block_id, TierId hot_tier) {
     co_await migrate(block_id, current, hot_tier);
 }
 
-std::vector<WriteBlock> AsyncMux::split(uint64_t offset, std::span<const Byte> data) {
+std::vector<WriteBlock> AsyncMux::split(uint64_t offset, asyncmux::span<const Byte> data) {
     std::vector<WriteBlock> out;
     size_t cursor = 0;
 
@@ -197,7 +197,7 @@ cppcoro::task<IoBuffer> FuseFrontend::on_read(const std::string& path,
 
 cppcoro::task<void> FuseFrontend::on_write(const std::string& path,
                                            uint64_t offset,
-                                           std::span<const Byte> data) {
+                                           asyncmux::span<const Byte> data) {
     co_await mux_.write(path, offset, data);
     co_return;
 }

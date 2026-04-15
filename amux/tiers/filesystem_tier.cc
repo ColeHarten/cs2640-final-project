@@ -92,7 +92,7 @@ cppcoro::task<IoBuffer> FileSystemTier::read_at(const std::string& relative_path
 
 cppcoro::task<void> FileSystemTier::write_at(const std::string& relative_path,
                                              uint64_t offset,
-                                             std::span<const Byte> data) {
+                                             asyncmux::span<const Byte> data) {
     co_await pool_.schedule();
 
     const auto path = full_path(relative_path);

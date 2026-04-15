@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+#include "span.hh"
+
 namespace asyncmux {
 
 using Byte = std::byte;
@@ -90,7 +92,7 @@ public:
 
     cppcoro::task<void> write(const std::string& path,
                               uint64_t offset,
-                              std::span<const Byte> data);
+                              asyncmux::span<const Byte> data);
 
     cppcoro::task<void> migrate(BlockId block_id, TierId src_id, TierId dst_id);
 
@@ -102,7 +104,7 @@ private:
         TierId tier_id;
     };
 
-    std::vector<WriteBlock> split(uint64_t offset, std::span<const Byte> data);
+    std::vector<WriteBlock> split(uint64_t offset, asyncmux::span<const Byte> data);
 
     IoBuffer assemble(const std::vector<BlockLocation>& locations,
                       std::vector<IoBuffer> pieces,
@@ -127,7 +129,7 @@ public:
 
     cppcoro::task<void> on_write(const std::string& path,
                                  uint64_t offset,
-                                 std::span<const Byte> data);
+                                 asyncmux::span<const Byte> data);
 
 private:
     AsyncMux& mux_;

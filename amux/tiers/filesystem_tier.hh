@@ -30,7 +30,7 @@ public:
 
     cppcoro::task<void> write_at(const std::string& relative_path,
                                  uint64_t offset,
-                                 std::span<const Byte> data) override;
+                                 asyncmux::span<const Byte> data) override;
 
     cppcoro::task<void> remove_file(const std::string& relative_path) override;
 

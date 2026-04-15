@@ -25,7 +25,7 @@ public:
 
     virtual cppcoro::task<void> write_at(const std::string& relative_path,
                                          uint64_t offset,
-                                         std::span<const Byte> data) = 0;
+                                         asyncmux::span<const Byte> data) = 0;
 
     virtual cppcoro::task<void> remove_file(const std::string& relative_path) = 0;
 };

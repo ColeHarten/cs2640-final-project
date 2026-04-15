@@ -202,17 +202,17 @@ task<void> test_placement_targets_expected_tier(Fixture& fx) {
     fx.placement.set(1);
     auto hot = to_bytes("hot");
     co_await fx.mux.write("/hot_file", 0,
-                          std::span<const Byte>(hot.data(), hot.size()));
+                          asyncmux::span<const Byte>(hot.data(), hot.size()));
 
     fx.placement.set(2);
     auto warm = to_bytes("warm");
     co_await fx.mux.write("/warm_file", 0,
-                          std::span<const Byte>(warm.data(), warm.size()));
+                          asyncmux::span<const Byte>(warm.data(), warm.size()));
 
     fx.placement.set(3);
     auto cold = to_bytes("cold");
     co_await fx.mux.write("/cold_file", 0,
-                          std::span<const Byte>(cold.data(), cold.size()));
+                          asyncmux::span<const Byte>(cold.data(), cold.size()));
 
     const auto hot_loc = sorted_locs(fx.metadata, "/hot_file", 0, hot.size()).at(0);
     const auto warm_loc = sorted_locs(fx.metadata, "/warm_file", 0, warm.size()).at(0);
@@ -240,7 +240,7 @@ task<void> test_multi_tier_fanout_read(Fixture& fx) {
 
     auto bytes = to_bytes(payload);
     co_await fx.mux.write("/fanout", 0,
-                          std::span<const Byte>(bytes.data(), bytes.size()));
+                          asyncmux::span<const Byte>(bytes.data(), bytes.size()));
 
     auto locs = sorted_locs(fx.metadata, "/fanout", 0, bytes.size());
     assert_true(locs.size() >= 3, "fanout payload should span at least three blocks");
@@ -272,7 +272,7 @@ task<void> test_promote_restores_hot_tier(Fixture& fx) {
 
     auto bytes = to_bytes(payload);
     co_await fx.mux.write("/promote", 0,
-                          std::span<const Byte>(bytes.data(), bytes.size()));
+                          asyncmux::span<const Byte>(bytes.data(), bytes.size()));
 
     auto locs = sorted_locs(fx.metadata, "/promote", 0, bytes.size());
     assert_true(!locs.empty(), "promote payload should create block metadata");
@@ -297,17 +297,17 @@ task<void> test_multiple_paths_across_tiers(Fixture& fx) {
     fx.placement.set(1);
     auto one = to_bytes("one-hot");
     co_await fx.mux.write("/group/one", 0,
-                          std::span<const Byte>(one.data(), one.size()));
+                          asyncmux::span<const Byte>(one.data(), one.size()));
 
     fx.placement.set(2);
     auto two = to_bytes("two-warm");
     co_await fx.mux.write("/group/two", 0,
-                          std::span<const Byte>(two.data(), two.size()));
+                          asyncmux::span<const Byte>(two.data(), two.size()));
 
     fx.placement.set(3);
     auto three = to_bytes("three-cold");
     co_await fx.mux.write("/group/three", 0,
-                          std::span<const Byte>(three.data(), three.size()));
+                          asyncmux::span<const Byte>(three.data(), three.size()));
 
     IoBuffer out_one = co_await fx.mux.read("/group/one", 0, one.size());
     IoBuffer out_two = co_await fx.mux.read("/group/two", 0, two.size());
@@ -338,14 +338,14 @@ task<void> test_overwrite_replaces_old_extents(Fixture& fx) {
     const std::string base((2 * kBlockSize) + 64, 'A');
     auto base_bytes = to_bytes(base);
     co_await fx.mux.write("/overwrite", 0,
-                          std::span<const Byte>(base_bytes.data(), base_bytes.size()));
+                          asyncmux::span<const Byte>(base_bytes.data(), base_bytes.size()));
 
     fx.placement.set(2);
     const std::string patch(700, 'B');
     auto patch_bytes = to_bytes(patch);
     const std::uint64_t patch_off = kBlockSize - 150;
     co_await fx.mux.write("/overwrite", patch_off,
-                          std::span<const Byte>(patch_bytes.data(), patch_bytes.size()));
+                          asyncmux::span<const Byte>(patch_bytes.data(), patch_bytes.size()));
 
     std::string expected = base;
     expected.replace(static_cast<std::size_t>(patch_off), patch.size(), patch);
@@ -380,7 +380,7 @@ task<void> test_cross_tier_overwrite_and_followup_read(Fixture& fx) {
     }
     auto payload_bytes = to_bytes(payload);
     co_await fx.mux.write("/cross_overwrite", 0,
-                          std::span<const Byte>(payload_bytes.data(), payload_bytes.size()));
+                          asyncmux::span<const Byte>(payload_bytes.data(), payload_bytes.size()));
 
     auto before = sorted_locs(fx.metadata, "/cross_overwrite", 0, payload_bytes.size());
     assert_true(before.size() >= 3, "cross_overwrite should start with several extents");
@@ -393,7 +393,7 @@ task<void> test_cross_tier_overwrite_and_followup_read(Fixture& fx) {
     auto patch_bytes = to_bytes(patch);
     const std::uint64_t patch_off = kBlockSize - 100;
     co_await fx.mux.write("/cross_overwrite", patch_off,
-                          std::span<const Byte>(patch_bytes.data(), patch_bytes.size()));
+                          asyncmux::span<const Byte>(patch_bytes.data(), patch_bytes.size()));
 
     payload.replace(static_cast<std::size_t>(patch_off), patch.size(), patch);
 
