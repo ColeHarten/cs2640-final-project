@@ -144,10 +144,14 @@ def combined_boot_script():
     script += "  sudo apt-get update\n"
     script += "  sudo apt-get install -y \\\n"
     script += "    build-essential \\\n"
+    script += "    g++ \\\n"
+    script += "    clang-12 \\\n"
+    script += "    libc++-12-dev \\\n"
+    script += "    libc++abi-12-dev \\\n"
+    script += "    libunwind-12-dev \\\n"
     script += "    cmake \\\n"
     script += "    pkg-config \\\n"
     script += "    git \\\n"
-    script += "    clang \\\n"
     script += "    gdb \\\n"
     script += "    make \\\n"
     script += "    fio \\\n"
@@ -187,9 +191,9 @@ def combined_boot_script():
     script += 'sudo mkdir -p "${USER_BASE}/mux-config"\n'
     script += 'sudo mkdir -p "${USER_BASE}/mux-scripts"\n'
     script += 'sudo mkdir -p "${USER_BASE}/workloads"\n'
-    script += 'sudo chown -R "${CLOUDLAB_USER}:${CLOUDLAB_USER}" "${USER_BASE}/results" "${USER_BASE}/bin" "${USER_BASE}/mux-config" "${USER_BASE}/mux-scripts" "${USER_BASE}/workloads" || true\n'
+    script += 'sudo chown -R "${CLOUDLAB_USER}" "${USER_BASE}/results" "${USER_BASE}/bin" "${USER_BASE}/mux-config" "${USER_BASE}/mux-scripts" "${USER_BASE}/workloads" || true\n'
     script += "\n"
-
+    
     if params.repo_url.strip():
         script += 'cd "${USER_BASE}"\n'
         script += 'if [ ! -d AsyncMux ]; then\n'
@@ -385,7 +389,7 @@ def combined_boot_script():
     script += "EOF\n"
     script += "\n"
 
-    script += 'cat > "${USER_BASE}/mux-scripts/show-topology.sh" <<EOF\n'
+    script += 'cat > "${USER_BASE}/mux-scripts/show-topology.sh" <<\'EOF\'\n'
     script += "#!/usr/bin/env bash\n"
     script += "set -euo pipefail\n"
     script += 'echo "Node: $(hostname)"\n'
@@ -405,7 +409,7 @@ def combined_boot_script():
     script += 'chmod +x "${USER_BASE}/mux-scripts/show-topology.sh"\n'
     script += "\n"
 
-    script += 'cat > "${USER_BASE}/mux-scripts/debug-mounts.sh" <<EOF\n'
+    script += 'cat > "${USER_BASE}/mux-scripts/debug-mounts.sh" <<\'EOF\'\n'
     script += "#!/usr/bin/env bash\n"
     script += "set -euo pipefail\n"
     script += 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
@@ -434,7 +438,7 @@ def combined_boot_script():
     script += 'chmod +x "${USER_BASE}/mux-scripts/debug-mounts.sh"\n'
     script += "\n"
 
-    script += 'cat > "${USER_BASE}/workloads/smoke.sh" <<EOF\n'
+    script += 'cat > "${USER_BASE}/workloads/smoke.sh" <<\'EOF\'\n'
     script += "#!/usr/bin/env bash\n"
     script += "set -euo pipefail\n"
     script += 'echo "Single-node smoke test from $(hostname)"\n'

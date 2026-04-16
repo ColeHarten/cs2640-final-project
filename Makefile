@@ -27,7 +27,7 @@ configure:
 build: configure
 	cmake --build $(BUILD_DIR) --parallel
 
-run: build
+run: 
 ifeq ($(TEST),all)
 	@status=0; \
 	for t in $(TEST_BINS); do \
