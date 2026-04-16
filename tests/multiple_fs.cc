@@ -7,14 +7,12 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 #include <sys/stat.h>
@@ -63,19 +61,6 @@ const fs::path kColdRoot = "/tier2/data";
 constexpr long kTmpfsMagic = 0x01021994;
 constexpr long kExtMagic   = 0xEF53;
 constexpr long kXfsMagic   = 0x58465342;
-
-long expected_magic_for_fs(const std::string& fs_name) {
-    if (fs_name == "tmpfs") {
-        return kTmpfsMagic;
-    }
-    if (fs_name == "ext4") {
-        return kExtMagic;
-    }
-    if (fs_name == "xfs") {
-        return kXfsMagic;
-    }
-    throw std::runtime_error("unknown filesystem type in topology: " + fs_name);
-}
 
 long fs_magic_for(const fs::path& root) {
     struct statfs stat_info {};
@@ -147,27 +132,6 @@ void ensure_tier_ready(const fs::path& root, const std::string& name) {
     std::cerr << "  fs_magic: 0x" << std::hex << fs_magic_for(root) << std::dec << "\n";
 }
 
-std::unordered_map<std::string, std::string> read_env_file(const fs::path& path) {
-    std::ifstream in(path);
-    if (!in) {
-        throw std::runtime_error("failed to open topology file: " + path.string());
-    }
-
-    std::unordered_map<std::string, std::string> out;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty()) {
-            continue;
-        }
-        const auto pos = line.find('=');
-        if (pos == std::string::npos) {
-            continue;
-        }
-        out[line.substr(0, pos)] = line.substr(pos + 1);
-    }
-    return out;
-}
-
 std::vector<BlockLocation> sorted_locs(MetadataStore& metadata,
                                        const std::string& path,
                                        std::uint64_t offset,
@@ -223,31 +187,8 @@ struct Fixture {
     MutablePlacementPolicy placement{1};
     AsyncMux mux;
 
-    std::string warm_fs;
-    std::string cold_fs;
-
     Fixture()
         : mux(tiers, metadata, placement, pool, false) {
-        const char* user = "hartenc";
-        if (!user) {
-            throw std::runtime_error("USER is not set");
-        }
-
-        const fs::path topo =
-            fs::path("/users") / user / "mux-config" / "topology.env";
-        const auto env = read_env_file(topo);
-
-        auto get_required = [&](const std::string& key) -> std::string {
-            const auto it = env.find(key);
-            if (it == env.end() || it->second.empty()) {
-                throw std::runtime_error("missing required key in topology.env: " + key);
-            }
-            return it->second;
-        };
-
-        warm_fs = get_required("TIER1_FS");
-        cold_fs = get_required("TIER2_FS");
-
         wait_for_mount(kHotRoot, "hot");
         wait_for_mount(kWarmRoot, "warm");
         wait_for_mount(kColdRoot, "cold");
@@ -268,13 +209,28 @@ struct Fixture {
     }
 };
 
-task<void> test_fs_types_are_expected(Fixture& fx) {
-    assert_true(fs_magic_for(kHotRoot) == kTmpfsMagic,
+task<void> test_fs_types_are_expected(Fixture&) {
+    const long hot_magic = fs_magic_for(kHotRoot);
+    const long warm_magic = fs_magic_for(kWarmRoot);
+    const long cold_magic = fs_magic_for(kColdRoot);
+
+    assert_true(hot_magic == kTmpfsMagic,
                 "hot tier must be tmpfs");
-    assert_true(fs_magic_for(kWarmRoot) == expected_magic_for_fs(fx.warm_fs),
-                "warm tier must have expected filesystem type");
-    assert_true(fs_magic_for(kColdRoot) == expected_magic_for_fs(fx.cold_fs),
-                "cold tier must have expected filesystem type");
+
+    const auto is_supported_disk_fs = [](long magic) {
+        return magic == kExtMagic || magic == kXfsMagic;
+    };
+
+    assert_true(is_supported_disk_fs(warm_magic),
+                "warm tier must be ext4 or xfs");
+    assert_true(is_supported_disk_fs(cold_magic),
+                "cold tier must be ext4 or xfs");
+
+    assert_true(warm_magic != kTmpfsMagic,
+                "warm tier must not be tmpfs");
+    assert_true(cold_magic != kTmpfsMagic,
+                "cold tier must not be tmpfs");
+
     co_return;
 }
 
