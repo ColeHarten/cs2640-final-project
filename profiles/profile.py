@@ -1,34 +1,20 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 
 """
 CloudLab Single-Node Multi-Filesystem AsyncMux Testbed
-  This script configures a single node with multiple storage tiers:
 
-   Tier 0: Optional tmpfs (in-memory, fast, volatile)
-   Tier 1: Loopback-mounted filesystem (ext4 or xfs)
-   Tier 2: Loopback-mounted filesystem (ext4 or xfs)
-   Tier 3: Optional additional loopback-mounted filesystem
+This profile configures a single node with multiple storage tiers:
 
-  Each tier is mounted at:
-   /tier0/tmpfs
-   /tier1/data
-   /tier2/data
-   /tier3/data
+  Tier 0: Optional tmpfs (in-memory, fast, volatile)
+  Tier 1: Loopback-mounted filesystem (ext4 or xfs)
+  Tier 2: Loopback-mounted filesystem (ext4 or xfs)
+  Tier 3: Optional additional loopback-mounted filesystem
 
-  The script performs:
-   - Dependency installation (optional)
-   - Loopback image creation and formatting
-   - Filesystem mounting and fstab persistence
-   - Directory setup for logs/cache/meta per tier
-   - Generation of debugging and topology scripts
-
-  Intended use:
-   - AsyncMux single-node development
-   - Multi-filesystem correctness testing
-   - Tiered storage placement/migration experiments
-
-  NOTE:
-   This script is executed at boot via CloudLab services.
+Each tier is mounted at:
+  /tier0/tmpfs
+  /tier1/data
+  /tier2/data
+  /tier3/data
 """
 
 import geni.portal as portal
@@ -37,41 +23,106 @@ import geni.rspec.pg as pg
 pc = portal.Context()
 request = pc.makeRequestRSpec()
 
-pc.defineParameter("hardware_type", "Preferred hardware type (leave blank for any available raw PC)",
-                   portal.ParameterType.STRING, "")
-pc.defineParameter("disk_image", "Disk image",
-                   portal.ParameterType.STRING,
-                   "urn:publicid:IDN+emulab.net+image+emulab-ops:UBUNTU22-64-STD")
-pc.defineParameter("num_tiers", "Number of tiers to configure",
-                   portal.ParameterType.INTEGER, 3, legalValues=[2, 3, 4])
-pc.defineParameter("install_deps", "Install common packages at boot",
-                   portal.ParameterType.BOOLEAN, True)
-pc.defineParameter("repo_url", "Optional git repo URL to clone",
-                   portal.ParameterType.STRING,
-                   "https://github.com/ColeHarten/cs2640-final-project")
-pc.defineParameter("repo_branch", "Optional git branch",
-                   portal.ParameterType.STRING, "main")
-pc.defineParameter("workspace_dir", "Directory to store loopback filesystem image files",
-                   portal.ParameterType.STRING, "/local")
-pc.defineParameter("tier0_tmpfs_gb", "Tier0 tmpfs size in GB (0 disables tmpfs)",
-                   portal.ParameterType.INTEGER, 4)
-pc.defineParameter("tier1_size_gb", "Tier1 image-backed filesystem size in GB",
-                   portal.ParameterType.INTEGER, 20)
-pc.defineParameter("tier2_size_gb", "Tier2 image-backed filesystem size in GB",
-                   portal.ParameterType.INTEGER, 50)
-pc.defineParameter("tier3_size_gb", "Tier3 image-backed filesystem size in GB",
-                   portal.ParameterType.INTEGER, 100)
-pc.defineParameter("tier1_fs", "Tier1 filesystem type",
-                   portal.ParameterType.STRING, "ext4",
-                   legalValues=[("ext4", "ext4"), ("xfs", "xfs")])
-pc.defineParameter("tier2_fs", "Tier2 filesystem type",
-                   portal.ParameterType.STRING, "xfs",
-                   legalValues=[("ext4", "ext4"), ("xfs", "xfs")])
-pc.defineParameter("tier3_fs", "Tier3 filesystem type",
-                   portal.ParameterType.STRING, "ext4",
-                   legalValues=[("ext4", "ext4"), ("xfs", "xfs")])
+pc.defineParameter(
+    "hardware_type",
+    "Preferred hardware type (leave blank for any available raw PC)",
+    portal.ParameterType.STRING,
+    "",
+)
+pc.defineParameter(
+    "disk_image",
+    "Disk image",
+    portal.ParameterType.STRING,
+    "urn:publicid:IDN+emulab.net+image+emulab-ops:UBUNTU22-64-STD",
+)
+pc.defineParameter(
+    "cloudlab_user",
+    "CloudLab username (optional; leave blank to auto-detect under /users)",
+    portal.ParameterType.STRING,
+    "",
+)
+pc.defineParameter(
+    "num_tiers",
+    "Number of tiers to configure",
+    portal.ParameterType.INTEGER,
+    3,
+    legalValues=[2, 3, 4],
+)
+pc.defineParameter(
+    "install_deps",
+    "Install common packages at boot",
+    portal.ParameterType.BOOLEAN,
+    True,
+)
+pc.defineParameter(
+    "repo_url",
+    "Optional git repo URL to clone",
+    portal.ParameterType.STRING,
+    "https://github.com/ColeHarten/cs2640-final-project",
+)
+pc.defineParameter(
+    "repo_branch",
+    "Optional git branch",
+    portal.ParameterType.STRING,
+    "main",
+)
+pc.defineParameter(
+    "workspace_dir",
+    "Directory to store loopback filesystem image files",
+    portal.ParameterType.STRING,
+    "/local",
+)
+pc.defineParameter(
+    "tier0_tmpfs_gb",
+    "Tier0 tmpfs size in GB (0 disables tmpfs)",
+    portal.ParameterType.INTEGER,
+    4,
+)
+pc.defineParameter(
+    "tier1_size_gb",
+    "Tier1 image-backed filesystem size in GB",
+    portal.ParameterType.INTEGER,
+    20,
+)
+pc.defineParameter(
+    "tier2_size_gb",
+    "Tier2 image-backed filesystem size in GB",
+    portal.ParameterType.INTEGER,
+    50,
+)
+pc.defineParameter(
+    "tier3_size_gb",
+    "Tier3 image-backed filesystem size in GB",
+    portal.ParameterType.INTEGER,
+    100,
+)
+pc.defineParameter(
+    "tier1_fs",
+    "Tier1 filesystem type",
+    portal.ParameterType.STRING,
+    "ext4",
+    legalValues=[("ext4", "ext4"), ("xfs", "xfs")],
+)
+pc.defineParameter(
+    "tier2_fs",
+    "Tier2 filesystem type",
+    portal.ParameterType.STRING,
+    "xfs",
+    legalValues=[("ext4", "ext4"), ("xfs", "xfs")],
+)
+pc.defineParameter(
+    "tier3_fs",
+    "Tier3 filesystem type",
+    portal.ParameterType.STRING,
+    "ext4",
+    legalValues=[("ext4", "ext4"), ("xfs", "xfs")],
+)
 
 params = pc.bindParameters()
+
+
+def shell_quote_single(s):
+    return s.replace("'", "'\"'\"'")
 
 
 def apply_node_defaults(node):
@@ -81,22 +132,19 @@ def apply_node_defaults(node):
 
 
 def combined_boot_script():
-    # All Python-level values are interpolated here via concatenation only.
-    # No .format() is used anywhere so bash ${var}, $((expr)), and {braces}
-    # are never misread as Python format tokens.
-
-    install_deps_val  = str(params.install_deps)
-    repo_url_val      = params.repo_url.replace("'", "'\"'\"'")   # single-quote-safe
-    repo_branch_val   = params.repo_branch.replace("'", "'\"'\"'")
-    workspace_dir_val = params.workspace_dir
-    num_tiers_val     = str(params.num_tiers)
+    install_deps_val = str(params.install_deps)
+    repo_url_val = shell_quote_single(params.repo_url)
+    repo_branch_val = shell_quote_single(params.repo_branch)
+    workspace_dir_val = shell_quote_single(params.workspace_dir)
+    cloudlab_user_val = shell_quote_single(params.cloudlab_user)
+    num_tiers_val = str(params.num_tiers)
     tier0_tmpfs_gb_val = str(params.tier0_tmpfs_gb)
-    tier1_size_gb_val  = str(params.tier1_size_gb)
-    tier2_size_gb_val  = str(params.tier2_size_gb)
-    tier3_size_gb_val  = str(params.tier3_size_gb)
-    tier1_fs_val  = params.tier1_fs
-    tier2_fs_val  = params.tier2_fs
-    tier3_fs_val  = params.tier3_fs
+    tier1_size_gb_val = str(params.tier1_size_gb)
+    tier2_size_gb_val = str(params.tier2_size_gb)
+    tier3_size_gb_val = str(params.tier3_size_gb)
+    tier1_fs_val = params.tier1_fs
+    tier2_fs_val = params.tier2_fs
+    tier3_fs_val = params.tier3_fs
 
     script = '#!/usr/bin/env bash\n'
     script += 'set -euxo pipefail\n'
@@ -104,7 +152,6 @@ def combined_boot_script():
     script += 'export DEBIAN_FRONTEND=noninteractive\n'
     script += '\n'
 
-    # ---------- optional dependency install ----------
     script += 'if [ "' + install_deps_val + '" = "True" ]; then\n'
     script += '  sudo apt-get update\n'
     script += '  sudo apt-get install -y \\\n'
@@ -130,36 +177,39 @@ def combined_boot_script():
     script += 'fi\n'
     script += '\n'
 
-    # ---------- sanity checks ----------
-    script += 'command -v mount    >/dev/null 2>&1 || { echo "mount missing";    exit 1; }\n'
-    script += 'command -v findmnt  >/dev/null 2>&1 || { echo "findmnt missing";  exit 1; }\n'
-    script += 'command -v blkid    >/dev/null 2>&1 || { echo "blkid missing";    exit 1; }\n'
-    script += 'command -v mkfs.ext4 >/dev/null 2>&1 || { echo "mkfs.ext4 missing"; exit 1; }\n'
-    script += 'command -v mkfs.xfs  >/dev/null 2>&1 || { echo "mkfs.xfs missing";  exit 1; }\n'
-    script += 'command -v losetup  >/dev/null 2>&1 || { echo "losetup missing";  exit 1; }\n'
+    script += 'command -v mount      >/dev/null 2>&1 || { echo "mount missing"; exit 1; }\n'
+    script += 'command -v mountpoint >/dev/null 2>&1 || { echo "mountpoint missing"; exit 1; }\n'
+    script += 'command -v findmnt    >/dev/null 2>&1 || { echo "findmnt missing"; exit 1; }\n'
+    script += 'command -v blkid      >/dev/null 2>&1 || { echo "blkid missing"; exit 1; }\n'
+    script += 'command -v mkfs.ext4  >/dev/null 2>&1 || { echo "mkfs.ext4 missing"; exit 1; }\n'
+    script += 'command -v mkfs.xfs   >/dev/null 2>&1 || { echo "mkfs.xfs missing"; exit 1; }\n'
+    script += 'command -v losetup    >/dev/null 2>&1 || { echo "losetup missing"; exit 1; }\n'
     script += '\n'
 
-    # ---------- directory setup ----------
-    # NOTE: $USER will be 'root' in the CloudLab boot context.
-    # Replace with your actual CloudLab username if you need per-user paths,
-    # e.g. hardcode: CLOUDLAB_USER="yourname"
-    script += 'CLOUDLAB_USER="${USER}"\n'
-    script += 'mkdir -p /users/${CLOUDLAB_USER}/results\n'
-    script += 'mkdir -p /users/${CLOUDLAB_USER}/bin\n'
-    script += 'mkdir -p /users/${CLOUDLAB_USER}/mux-config\n'
-    script += 'mkdir -p /users/${CLOUDLAB_USER}/mux-scripts\n'
-    script += 'mkdir -p /users/${CLOUDLAB_USER}/workloads\n'
+    script += 'CLOUDLAB_USER_OVERRIDE=\'' + cloudlab_user_val + '\'\n'
+    script += 'if [ -n "$CLOUDLAB_USER_OVERRIDE" ]; then\n'
+    script += '  CLOUDLAB_USER="$CLOUDLAB_USER_OVERRIDE"\n'
+    script += 'elif [ -d /users ] && [ -n "$(find /users -mindepth 1 -maxdepth 1 -type d | head -n1)" ]; then\n'
+    script += '  CLOUDLAB_USER="$(find /users -mindepth 1 -maxdepth 1 -type d -printf "%f\\n" | head -n1)"\n'
+    script += 'else\n'
+    script += '  CLOUDLAB_USER="${SUDO_USER:-${USER}}"\n'
+    script += 'fi\n'
+    script += '\n'
+    script += 'USER_BASE="/users/${CLOUDLAB_USER}"\n'
+    script += 'mkdir -p "${USER_BASE}/results"\n'
+    script += 'mkdir -p "${USER_BASE}/bin"\n'
+    script += 'mkdir -p "${USER_BASE}/mux-config"\n'
+    script += 'mkdir -p "${USER_BASE}/mux-scripts"\n'
+    script += 'mkdir -p "${USER_BASE}/workloads"\n'
     script += '\n'
 
-    # ---------- optional git clone ----------
-    if repo_url_val.strip():
-        script += 'cd /users/${CLOUDLAB_USER}\n'
+    if params.repo_url.strip():
+        script += 'cd "${USER_BASE}"\n'
         script += 'if [ ! -d AsyncMux ]; then\n'
         script += '  git clone -b \'' + repo_branch_val + '\' \'' + repo_url_val + '\' AsyncMux\n'
         script += 'fi\n'
         script += '\n'
 
-    # ---------- Python-supplied constants baked in ----------
     script += 'WORKSPACE_DIR=\'' + workspace_dir_val + '\'\n'
     script += 'NUM_TIERS=' + num_tiers_val + '\n'
     script += 'TIER0_TMPFS_GB=' + tier0_tmpfs_gb_val + '\n'
@@ -169,11 +219,9 @@ def combined_boot_script():
     script += 'TIER1_FS=' + tier1_fs_val + '\n'
     script += 'TIER2_FS=' + tier2_fs_val + '\n'
     script += 'TIER3_FS=' + tier3_fs_val + '\n'
-    script += '\n'
     script += 'sudo mkdir -p "$WORKSPACE_DIR"\n'
     script += '\n'
 
-    # ---------- bash helper functions (pure bash, no Python interpolation) ----------
     script += 'remove_fstab_entry() {\n'
     script += '  local mountpoint="$1"\n'
     script += '  sudo sed -i "\\|[[:space:]]$mountpoint[[:space:]]|d" /etc/fstab\n'
@@ -196,18 +244,23 @@ def combined_boot_script():
     script += '}\n'
     script += '\n'
 
+    script += 'cleanup_loop_for_image() {\n'
+    script += '  local image_path="$1"\n'
+    script += '  sudo losetup -j "$image_path" | cut -d: -f1 | while IFS= read -r dev; do\n'
+    script += '    [ -n "$dev" ] || continue\n'
+    script += '    sudo losetup -d "$dev" || true\n'
+    script += '  done\n'
+    script += '}\n'
+    script += '\n'
+
     script += 'setup_tmpfs_tier() {\n'
     script += '  local mountpoint="$1"\n'
     script += '  local size_gb="$2"\n'
-    script += '\n'
     script += '  sudo mkdir -p "$mountpoint"\n'
-    script += '\n'
     script += '  if mountpoint -q "$mountpoint"; then\n'
     script += '    sudo umount "$mountpoint" || true\n'
     script += '  fi\n'
-    script += '\n'
     script += '  remove_fstab_entry "$mountpoint"\n'
-    script += '\n'
     script += '  if [ "$size_gb" -gt 0 ]; then\n'
     script += '    sudo mount -t tmpfs -o size="${size_gb}G" tmpfs "$mountpoint"\n'
     script += '    wait_for_mountpoint "$mountpoint"\n'
@@ -222,7 +275,6 @@ def combined_boot_script():
     script += '  local image_path="$2"\n'
     script += '  local size_gb="$3"\n'
     script += '  local fs_type="$4"\n'
-    script += '\n'
     script += '  local data_mount="${mount_base}/data"\n'
     script += '  local loopdev=""\n'
     script += '  local current_type=""\n'
@@ -236,12 +288,11 @@ def combined_boot_script():
     script += '  if mountpoint -q "$data_mount"; then\n'
     script += '    sudo umount "$data_mount" || true\n'
     script += '  fi\n'
-    script += '\n'
     script += '  remove_fstab_entry "$data_mount"\n'
+    script += '  cleanup_loop_for_image "$image_path"\n'
     script += '\n'
     script += '  sudo mkdir -p "$(dirname "$image_path")"\n'
     script += '  sudo truncate -s "${size_gb}G" "$image_path"\n'
-    script += '\n'
     script += '  loopdev="$(sudo losetup --find --show "$image_path")"\n'
     script += '\n'
     script += '  if sudo blkid -o value -s TYPE "$loopdev" >/dev/null 2>&1; then\n'
@@ -249,7 +300,7 @@ def combined_boot_script():
     script += '  fi\n'
     script += '\n'
     script += '  if [ "$current_type" != "$fs_type" ]; then\n'
-    script += '    echo "Formatting $loopdev as $fs_type (was: ${current_type:-none})"\n'
+    script += '    printf \'Formatting %s as %s (was: %s)\\n\' "$loopdev" "$fs_type" "${current_type:-none}"\n'
     script += '    if [ "$fs_type" = "ext4" ]; then\n'
     script += '      sudo mkfs.ext4 -F "$loopdev"\n'
     script += '    elif [ "$fs_type" = "xfs" ]; then\n'
@@ -274,14 +325,11 @@ def combined_boot_script():
     script += '  fi\n'
     script += '\n'
     script += '  echo "$image_path $data_mount $fs_type loop,rw,nosuid,nodev 0 0" | sudo tee -a /etc/fstab >/dev/null\n'
-    script += '\n'
     script += '  echo "=== mounted $data_mount ==="\n'
     script += '  findmnt "$data_mount" || true\n'
     script += '  mount | grep "$data_mount" || true\n'
     script += '  stat -f -c \'%n %T %t\' "$data_mount" || true\n'
     script += '  sudo blkid "$image_path" || true\n'
-    script += '\n'
-    script += '  sudo losetup -d "$loopdev"\n'
     script += '}\n'
     script += '\n'
 
@@ -292,7 +340,6 @@ def combined_boot_script():
     script += '  local fs_type="$4"\n'
     script += '  local image_path="$5"\n'
     script += '  local tmpfs_mount="$6"\n'
-    script += '\n'
     script += '  cat <<EOF | sudo tee "${mount_base}/tier.conf" >/dev/null\n'
     script += 'tier_index=${tier_idx}\n'
     script += 'data_mount=${data_mount}\n'
@@ -303,7 +350,6 @@ def combined_boot_script():
     script += '}\n'
     script += '\n'
 
-    # ---------- create tier directories ----------
     script += 'sudo mkdir -p /tier0 /tier1 /tier2 /tier3\n'
     script += 'sudo mkdir -p /tier0/logs /tier0/cache /tier0/meta\n'
     script += 'sudo mkdir -p /tier1/logs /tier1/cache /tier1/meta\n'
@@ -311,7 +357,6 @@ def combined_boot_script():
     script += 'sudo mkdir -p /tier3/logs /tier3/cache /tier3/meta\n'
     script += '\n'
 
-    # ---------- tier 0: tmpfs ----------
     script += 'if [ "$TIER0_TMPFS_GB" -gt 0 ]; then\n'
     script += '  setup_tmpfs_tier /tier0/tmpfs "$TIER0_TMPFS_GB"\n'
     script += '  write_tier_conf 0 /tier0 "" "tmpfs" "" "/tier0/tmpfs"\n'
@@ -320,29 +365,27 @@ def combined_boot_script():
     script += 'fi\n'
     script += '\n'
 
-    # ---------- tier 1 ----------
     script += 'if [ "$NUM_TIERS" -ge 2 ]; then\n'
     script += '  setup_loop_fs_tier /tier1 "$WORKSPACE_DIR/tier1.img" "$TIER1_SIZE_GB" "$TIER1_FS"\n'
     script += '  write_tier_conf 1 /tier1 /tier1/data "$TIER1_FS" "$WORKSPACE_DIR/tier1.img" ""\n'
     script += 'fi\n'
     script += '\n'
 
-    # ---------- tier 2 ----------
     script += 'if [ "$NUM_TIERS" -ge 3 ]; then\n'
     script += '  setup_loop_fs_tier /tier2 "$WORKSPACE_DIR/tier2.img" "$TIER2_SIZE_GB" "$TIER2_FS"\n'
     script += '  write_tier_conf 2 /tier2 /tier2/data "$TIER2_FS" "$WORKSPACE_DIR/tier2.img" ""\n'
     script += 'fi\n'
     script += '\n'
 
-    # ---------- tier 3 ----------
     script += 'if [ "$NUM_TIERS" -ge 4 ]; then\n'
     script += '  setup_loop_fs_tier /tier3 "$WORKSPACE_DIR/tier3.img" "$TIER3_SIZE_GB" "$TIER3_FS"\n'
     script += '  write_tier_conf 3 /tier3 /tier3/data "$TIER3_FS" "$WORKSPACE_DIR/tier3.img" ""\n'
     script += 'fi\n'
     script += '\n'
 
-    # ---------- topology env file ----------
-    script += 'cat > /users/${CLOUDLAB_USER}/mux-config/topology.env <<EOF\n'
+    script += 'cat > "${USER_BASE}/mux-config/topology.env" <<EOF\n'
+    script += 'CLOUDLAB_USER=$CLOUDLAB_USER\n'
+    script += 'USER_BASE=$USER_BASE\n'
     script += 'NUM_TIERS=$NUM_TIERS\n'
     script += 'TIER0_TMPFS=/tier0/tmpfs\n'
     script += 'TIER1_DATA=/tier1/data\n'
@@ -355,14 +398,13 @@ def combined_boot_script():
     script += 'EOF\n'
     script += '\n'
 
-    # ---------- show-topology.sh (quoted heredoc so $ is literal) ----------
-    script += "cat > /users/${CLOUDLAB_USER}/mux-scripts/show-topology.sh <<'ENDOFSCRIPT'\n"
+    script += 'cat > "${USER_BASE}/mux-scripts/show-topology.sh" <<\'ENDOFSCRIPT\'\n'
     script += '#!/usr/bin/env bash\n'
     script += 'set -euo pipefail\n'
     script += 'echo "Node: $(hostname)"\n'
     script += 'echo\n'
     script += 'echo "Mounted tiers:"\n'
-    script += "mount | grep '/tier' || true\n"
+    script += 'mount | grep \'/tier\' || true\n'
     script += 'echo\n'
     script += 'echo "findmnt:"\n'
     script += 'findmnt /tier0/tmpfs || true\n'
@@ -373,14 +415,15 @@ def combined_boot_script():
     script += 'echo "Tier configs:"\n'
     script += 'find /tier0 /tier1 /tier2 /tier3 -name tier.conf 2>/dev/null -print -exec cat {} \\;\n'
     script += 'ENDOFSCRIPT\n'
-    script += 'chmod +x /users/${CLOUDLAB_USER}/mux-scripts/show-topology.sh\n'
+    script += 'chmod +x "${USER_BASE}/mux-scripts/show-topology.sh"\n'
     script += '\n'
 
-    # ---------- debug-mounts.sh (quoted heredoc) ----------
-    script += "cat > /users/${CLOUDLAB_USER}/mux-scripts/debug-mounts.sh <<'ENDOFSCRIPT'\n"
+    script += 'cat > "${USER_BASE}/mux-scripts/debug-mounts.sh" <<\'ENDOFSCRIPT\'\n'
     script += '#!/usr/bin/env bash\n'
     script += 'set -euo pipefail\n'
-    script += 'source /users/${USER}/mux-config/topology.env\n'
+    script += 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+    script += 'USER_BASE="$(cd "${SCRIPT_DIR}/.." && pwd)"\n'
+    script += 'source "${USER_BASE}/mux-config/topology.env"\n'
     script += 'echo "=== mount ==="\n'
     script += 'mount | grep /tier || true\n'
     script += 'echo\n'
@@ -391,37 +434,35 @@ def combined_boot_script():
     script += 'findmnt /tier3/data  || true\n'
     script += 'echo\n'
     script += 'echo "=== statfs ==="\n'
-    script += "stat -f -c '%n %T %t' /tier0/tmpfs || true\n"
-    script += "stat -f -c '%n %T %t' /tier1/data  || true\n"
-    script += "stat -f -c '%n %T %t' /tier2/data  || true\n"
-    script += "stat -f -c '%n %T %t' /tier3/data  || true\n"
+    script += 'stat -f -c \'%n %T %t\' /tier0/tmpfs || true\n'
+    script += 'stat -f -c \'%n %T %t\' /tier1/data  || true\n'
+    script += 'stat -f -c \'%n %T %t\' /tier2/data  || true\n'
+    script += 'stat -f -c \'%n %T %t\' /tier3/data  || true\n'
     script += 'echo\n'
     script += 'echo "=== blkid ==="\n'
     script += 'sudo blkid "$WORKSPACE_DIR/tier1.img" || true\n'
     script += 'sudo blkid "$WORKSPACE_DIR/tier2.img" || true\n'
     script += 'sudo blkid "$WORKSPACE_DIR/tier3.img" || true\n'
     script += 'ENDOFSCRIPT\n'
-    script += 'chmod +x /users/${CLOUDLAB_USER}/mux-scripts/debug-mounts.sh\n'
+    script += 'chmod +x "${USER_BASE}/mux-scripts/debug-mounts.sh"\n'
     script += '\n'
 
-    # ---------- smoke test ----------
-    script += "cat > /users/${CLOUDLAB_USER}/workloads/smoke.sh <<'ENDOFSCRIPT'\n"
+    script += 'cat > "${USER_BASE}/workloads/smoke.sh" <<\'ENDOFSCRIPT\'\n'
     script += '#!/usr/bin/env bash\n'
     script += 'set -euo pipefail\n'
     script += 'echo "Single-node smoke test from $(hostname)"\n'
     script += 'cmake --version\n'
     script += 'fio --version || true\n'
-    script += "mount | grep '/tier' || true\n"
+    script += 'mount | grep \'/tier\' || true\n'
     script += 'findmnt /tier0/tmpfs || true\n'
     script += 'findmnt /tier1/data  || true\n'
     script += 'findmnt /tier2/data  || true\n'
     script += 'findmnt /tier3/data  || true\n'
     script += 'ENDOFSCRIPT\n'
-    script += 'chmod +x /users/${CLOUDLAB_USER}/workloads/smoke.sh\n'
+    script += 'chmod +x "${USER_BASE}/workloads/smoke.sh"\n'
     script += '\n'
 
-    # ---------- README ----------
-    script += 'cat > /users/${CLOUDLAB_USER}/README-CLOUDLAB-TOPOLOGY.txt <<EOF\n'
+    script += 'cat > "${USER_BASE}/README-CLOUDLAB-TOPOLOGY.txt" <<EOF\n'
     script += 'Single-node CloudLab multitier testbed\n'
     script += '\n'
     script += 'Expected mounts:\n'
@@ -437,26 +478,24 @@ def combined_boot_script():
     script += 'EOF\n'
     script += '\n'
 
-    # ---------- final status ----------
     script += 'echo "Single-node multi-filesystem setup complete on $(hostname)"\n'
+    script += 'echo "Using CloudLab user: $CLOUDLAB_USER"\n'
     script += 'echo "==== FINAL TIER STATUS ===="\n'
-    script += "mount | grep '/tier' || true\n"
+    script += 'mount | grep \'/tier\' || true\n'
     script += 'findmnt /tier0/tmpfs || true\n'
     script += 'findmnt /tier1/data  || true\n'
     script += 'findmnt /tier2/data  || true\n'
     script += 'findmnt /tier3/data  || true\n'
-    script += "stat -f -c '%n %T %t' /tier0/tmpfs || true\n"
-    script += "stat -f -c '%n %T %t' /tier1/data  || true\n"
-    script += "stat -f -c '%n %T %t' /tier2/data  || true\n"
-    script += "stat -f -c '%n %T %t' /tier3/data  || true\n"
+    script += 'stat -f -c \'%n %T %t\' /tier0/tmpfs || true\n'
+    script += 'stat -f -c \'%n %T %t\' /tier1/data  || true\n'
+    script += 'stat -f -c \'%n %T %t\' /tier2/data  || true\n'
+    script += 'stat -f -c \'%n %T %t\' /tier3/data  || true\n'
 
     return script
 
 
 def add_common_services(node):
     boot = combined_boot_script()
-    # Concatenation only -- no .format() so bash ${}, $(()), and bare braces
-    # in the boot script are never misinterpreted as Python format tokens.
     launcher = (
         "cat > /tmp/cloudlab-mux-boot.sh <<'BOOTEOF'\n"
         + boot
@@ -464,7 +503,7 @@ def add_common_services(node):
         + "chmod +x /tmp/cloudlab-mux-boot.sh\n"
         + "bash /tmp/cloudlab-mux-boot.sh\n"
     )
-    node.addService(pg.Execute(shell="sh", command=launcher))
+    node.addService(pg.Execute(shell="bash", command=launcher))
 
 
 node = request.RawPC("muxnode")
