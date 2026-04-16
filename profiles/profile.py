@@ -46,7 +46,7 @@ pc.defineParameter(
     "repo_url",
     "Optional git repo URL to clone",
     portal.ParameterType.STRING,
-    "https://github.com/ColeHarten/cs2640-final-project",
+    "",
 )
 pc.defineParameter(
     "repo_branch",
@@ -130,9 +130,9 @@ def combined_boot_script():
     tier1_size_gb_val = str(params.tier1_size_gb)
     tier2_size_gb_val = str(params.tier2_size_gb)
     tier3_size_gb_val = str(params.tier3_size_gb)
-    tier1_fs_val = params.tier1_fs
-    tier2_fs_val = params.tier2_fs
-    tier3_fs_val = params.tier3_fs
+    tier1_fs_val = sq(params.tier1_fs)
+    tier2_fs_val = sq(params.tier2_fs)
+    tier3_fs_val = sq(params.tier3_fs)
 
     script = "#!/usr/bin/env bash\n"
     script += "set -euxo pipefail\n"
@@ -182,7 +182,7 @@ def combined_boot_script():
     script += 'if [ -z "$CLOUDLAB_USER" ]; then\n'
     script += '  echo "cloudlab_user parameter must be provided"\n'
     script += '  exit 1\n'
-    script += 'fi\n'
+    script += "fi\n"
     script += "\n"
 
     script += 'USER_BASE="/users/${CLOUDLAB_USER}"\n'
@@ -207,9 +207,9 @@ def combined_boot_script():
     script += "TIER1_SIZE_GB=" + tier1_size_gb_val + "\n"
     script += "TIER2_SIZE_GB=" + tier2_size_gb_val + "\n"
     script += "TIER3_SIZE_GB=" + tier3_size_gb_val + "\n"
-    script += "TIER1_FS=" + tier1_fs_val + "\n"
-    script += "TIER2_FS=" + tier2_fs_val + "\n"
-    script += "TIER3_FS=" + tier3_fs_val + "\n"
+    script += "TIER1_FS='" + tier1_fs_val + "'\n"
+    script += "TIER2_FS='" + tier2_fs_val + "'\n"
+    script += "TIER3_FS='" + tier3_fs_val + "'\n"
     script += 'sudo mkdir -p "$WORKSPACE_DIR"\n'
     script += "\n"
 
@@ -325,7 +325,6 @@ def combined_boot_script():
     script += '  sudo blkid "$image_path" || true\n'
     script += '  sudo chown "${CLOUDLAB_USER}" "$data_mount"\n'
     script += '  sudo chmod 755 "$data_mount"\n'
-    script += '  sudo losetup -d "$loopdev" || true\n'
     script += "}\n"
     script += "\n"
 
@@ -343,6 +342,7 @@ def combined_boot_script():
     script += "image_path=${image_path}\n"
     script += "tmpfs_mount=${tmpfs_mount}\n"
     script += "EOF\n"
+    script += '  sudo chown "${CLOUDLAB_USER}" "${mount_base}/tier.conf"\n'
     script += "}\n"
     script += "\n"
 
@@ -379,7 +379,7 @@ def combined_boot_script():
     script += "fi\n"
     script += "\n"
 
-    script += 'cat > "${USER_BASE}/mux-config/topology.env" <<EOF\n'
+    script += 'cat <<EOF | sudo tee "${USER_BASE}/mux-config/topology.env" >/dev/null\n'
     script += "CLOUDLAB_USER=$CLOUDLAB_USER\n"
     script += "USER_BASE=$USER_BASE\n"
     script += "NUM_TIERS=$NUM_TIERS\n"
@@ -392,9 +392,11 @@ def combined_boot_script():
     script += "TIER3_FS=$TIER3_FS\n"
     script += "WORKSPACE_DIR=$WORKSPACE_DIR\n"
     script += "EOF\n"
+    script += 'sudo chown "${CLOUDLAB_USER}" "${USER_BASE}/mux-config/topology.env"\n'
+    script += 'sudo chmod 644 "${USER_BASE}/mux-config/topology.env"\n'
     script += "\n"
 
-    script += 'cat > "${USER_BASE}/mux-scripts/show-topology.sh" <<\'EOF\'\n'
+    script += 'cat <<\'EOF\' | sudo tee "${USER_BASE}/mux-scripts/show-topology.sh" >/dev/null\n'
     script += "#!/usr/bin/env bash\n"
     script += "set -euo pipefail\n"
     script += 'echo "Node: $(hostname)"\n'
@@ -411,10 +413,11 @@ def combined_boot_script():
     script += 'echo "Tier configs:"\n'
     script += "find /tier0 /tier1 /tier2 /tier3 -name tier.conf 2>/dev/null -print -exec cat {} \\;\n"
     script += "EOF\n"
-    script += 'chmod +x "${USER_BASE}/mux-scripts/show-topology.sh"\n'
+    script += 'sudo chown "${CLOUDLAB_USER}" "${USER_BASE}/mux-scripts/show-topology.sh"\n'
+    script += 'sudo chmod 755 "${USER_BASE}/mux-scripts/show-topology.sh"\n'
     script += "\n"
 
-    script += 'cat > "${USER_BASE}/mux-scripts/debug-mounts.sh" <<\'EOF\'\n'
+    script += 'cat <<\'EOF\' | sudo tee "${USER_BASE}/mux-scripts/debug-mounts.sh" >/dev/null\n'
     script += "#!/usr/bin/env bash\n"
     script += "set -euo pipefail\n"
     script += 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
@@ -440,10 +443,11 @@ def combined_boot_script():
     script += 'sudo blkid "$WORKSPACE_DIR/tier2.img" || true\n'
     script += 'sudo blkid "$WORKSPACE_DIR/tier3.img" || true\n'
     script += "EOF\n"
-    script += 'chmod +x "${USER_BASE}/mux-scripts/debug-mounts.sh"\n'
+    script += 'sudo chown "${CLOUDLAB_USER}" "${USER_BASE}/mux-scripts/debug-mounts.sh"\n'
+    script += 'sudo chmod 755 "${USER_BASE}/mux-scripts/debug-mounts.sh"\n'
     script += "\n"
 
-    script += 'cat > "${USER_BASE}/workloads/smoke.sh" <<\'EOF\'\n'
+    script += 'cat <<\'EOF\' | sudo tee "${USER_BASE}/workloads/smoke.sh" >/dev/null\n'
     script += "#!/usr/bin/env bash\n"
     script += "set -euo pipefail\n"
     script += 'echo "Single-node smoke test from $(hostname)"\n'
@@ -455,10 +459,11 @@ def combined_boot_script():
     script += "findmnt /tier2/data  || true\n"
     script += "findmnt /tier3/data  || true\n"
     script += "EOF\n"
-    script += 'chmod +x "${USER_BASE}/workloads/smoke.sh"\n'
+    script += 'sudo chown "${CLOUDLAB_USER}" "${USER_BASE}/workloads/smoke.sh"\n'
+    script += 'sudo chmod 755 "${USER_BASE}/workloads/smoke.sh"\n'
     script += "\n"
 
-    script += 'cat > "${USER_BASE}/README-CLOUDLAB-TOPOLOGY.txt" <<EOF\n'
+    script += 'cat <<EOF | sudo tee "${USER_BASE}/README-CLOUDLAB-TOPOLOGY.txt" >/dev/null\n'
     script += "Single-node CloudLab multitier testbed\n"
     script += "\n"
     script += "Expected mounts:\n"
@@ -472,6 +477,8 @@ def combined_boot_script():
     script += "  - multi-filesystem correctness tests\n"
     script += "  - tier placement/migration/promotion on one node\n"
     script += "EOF\n"
+    script += 'sudo chown "${CLOUDLAB_USER}" "${USER_BASE}/README-CLOUDLAB-TOPOLOGY.txt"\n'
+    script += 'sudo chmod 644 "${USER_BASE}/README-CLOUDLAB-TOPOLOGY.txt"\n'
     script += "\n"
 
     script += 'echo "Single-node multi-filesystem setup complete on $(hostname)"\n'
@@ -488,6 +495,7 @@ def combined_boot_script():
     script += 'stat -f -c "%n %T %t" /tier3/data  || true\n'
 
     return script
+
 
 def add_common_services(node):
     boot = combined_boot_script()

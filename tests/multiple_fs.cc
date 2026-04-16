@@ -228,7 +228,7 @@ struct Fixture {
 
     Fixture()
         : mux(tiers, metadata, placement, pool, false) {
-        const char* user = std::getenv("CLOUDLAB_USER");
+        const char* user = "hartenc";
         if (!user) {
             throw std::runtime_error("USER is not set");
         }
