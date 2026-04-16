@@ -257,6 +257,8 @@ def combined_boot_script():
     script += '    wait_for_mountpoint "$mountpoint"\n'
     script += '    echo "tmpfs $mountpoint tmpfs rw,nosuid,nodev,size=${size_gb}G 0 0" | sudo tee -a /etc/fstab >/dev/null\n'
     script += '    findmnt "$mountpoint"\n'
+    script += '    sudo chown "${CLOUDLAB_USER}" "$mountpoint"\n'
+    script += '    sudo chmod 755 "$mountpoint"\n'
     script += "  fi\n"
     script += "}\n"
     script += "\n"
