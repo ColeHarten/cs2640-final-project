@@ -193,7 +193,7 @@ def combined_boot_script():
     script += 'sudo mkdir -p "${USER_BASE}/workloads"\n'
     script += 'sudo chown -R "${CLOUDLAB_USER}" "${USER_BASE}/results" "${USER_BASE}/bin" "${USER_BASE}/mux-config" "${USER_BASE}/mux-scripts" "${USER_BASE}/workloads" || true\n'
     script += "\n"
-    
+
     if params.repo_url.strip():
         script += 'cd "${USER_BASE}"\n'
         script += 'if [ ! -d AsyncMux ]; then\n'
@@ -323,6 +323,9 @@ def combined_boot_script():
     script += '  mount | grep "$data_mount" || true\n'
     script += '  stat -f -c "%n %T %t" "$data_mount" || true\n'
     script += '  sudo blkid "$image_path" || true\n'
+    script += '  sudo chown "${CLOUDLAB_USER}" "$data_mount"\n'
+    script += '  sudo chmod 755 "$data_mount"\n'
+    script += '  sudo losetup -d "$loopdev" || true\n'
     script += "}\n"
     script += "\n"
 
@@ -485,7 +488,6 @@ def combined_boot_script():
     script += 'stat -f -c "%n %T %t" /tier3/data  || true\n'
 
     return script
-
 
 def add_common_services(node):
     boot = combined_boot_script()
