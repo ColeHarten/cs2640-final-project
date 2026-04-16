@@ -25,9 +25,9 @@ pc.defineParameter(
 )
 pc.defineParameter(
     "cloudlab_user",
-    "CloudLab username (optional; leave blank to auto-detect under /users)",
+    "CloudLab username",
     portal.ParameterType.STRING,
-    "",
+    "hartenc",
 )
 pc.defineParameter(
     "num_tiers",
@@ -174,22 +174,20 @@ def combined_boot_script():
     script += 'command -v losetup >/dev/null 2>&1 || { echo "losetup missing"; exit 1; }\n'
     script += "\n"
 
-    script += "CLOUDLAB_USER_OVERRIDE='" + cloudlab_user_val + "'\n"
-    script += 'if [ -n "$CLOUDLAB_USER_OVERRIDE" ]; then\n'
-    script += '  CLOUDLAB_USER="$CLOUDLAB_USER_OVERRIDE"\n'
-    script += 'elif [ -d /users ] && [ -n "$(find /users -mindepth 1 -maxdepth 1 -type d | head -n1)" ]; then\n'
-    script += '  CLOUDLAB_USER="$(find /users -mindepth 1 -maxdepth 1 -type d -printf "%f\\n" | head -n1)"\n'
-    script += "else\n"
-    script += '  CLOUDLAB_USER="${SUDO_USER:-${USER}}"\n'
-    script += "fi\n"
+    script += "CLOUDLAB_USER='" + cloudlab_user_val + "'\n"
+    script += 'if [ -z "$CLOUDLAB_USER" ]; then\n'
+    script += '  echo "cloudlab_user parameter must be provided"\n'
+    script += '  exit 1\n'
+    script += 'fi\n'
     script += "\n"
 
     script += 'USER_BASE="/users/${CLOUDLAB_USER}"\n'
-    script += 'mkdir -p "${USER_BASE}/results"\n'
-    script += 'mkdir -p "${USER_BASE}/bin"\n'
-    script += 'mkdir -p "${USER_BASE}/mux-config"\n'
-    script += 'mkdir -p "${USER_BASE}/mux-scripts"\n'
-    script += 'mkdir -p "${USER_BASE}/workloads"\n'
+    script += 'sudo mkdir -p "${USER_BASE}/results"\n'
+    script += 'sudo mkdir -p "${USER_BASE}/bin"\n'
+    script += 'sudo mkdir -p "${USER_BASE}/mux-config"\n'
+    script += 'sudo mkdir -p "${USER_BASE}/mux-scripts"\n'
+    script += 'sudo mkdir -p "${USER_BASE}/workloads"\n'
+    script += 'sudo chown -R "${CLOUDLAB_USER}:${CLOUDLAB_USER}" "${USER_BASE}/results" "${USER_BASE}/bin" "${USER_BASE}/mux-config" "${USER_BASE}/mux-scripts" "${USER_BASE}/workloads" || true\n'
     script += "\n"
 
     if params.repo_url.strip():
