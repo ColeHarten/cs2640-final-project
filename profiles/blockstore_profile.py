@@ -158,7 +158,7 @@ def combined_boot_script():
     script += "    iperf3 \\\n"
     script += "    util-linux \\\n"
     script += "    xfsprogs \\\n"
-    script += "    e2fsprogs \\\n"
+    script += "    e2fsprogs \n"
     script += "fi\n"
     script += "\n"
 
