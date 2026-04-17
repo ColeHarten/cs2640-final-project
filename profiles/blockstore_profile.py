@@ -79,6 +79,14 @@ pc.defineParameter(
     100,
 )
 
+pc.defineParameter(
+    "tier2_fs",
+    "Tier2 filesystem type",
+    portal.ParameterType.STRING,
+    "xfs",
+    legalValues=[("ext4", "ext4"), ("xfs", "xfs")],
+)
+
 params = pc.bindParameters()
 
 
@@ -117,6 +125,7 @@ def combined_boot_script():
     cloudlab_user_val = sq(params.cloudlab_user)
     num_tiers_val = str(params.num_tiers)
     tier0_tmpfs_gb_val = str(params.tier0_tmpfs_gb)
+    tier2_fs_val = sq(params.tier2_fs)
 
     script = "#!/usr/bin/env bash\n"
     script += "set -euxo pipefail\n"
@@ -147,7 +156,9 @@ def combined_boot_script():
     script += "    rsync \\\n"
     script += "    net-tools \\\n"
     script += "    iperf3 \\\n"
-    script += "    util-linux\n"
+    script += "    util-linux \\\n"
+    script += "    xfsprogs \\\n"
+    script += "    e2fsprogs \\\n"
     script += "fi\n"
     script += "\n"
 
@@ -181,6 +192,7 @@ def combined_boot_script():
 
     script += "NUM_TIERS=" + num_tiers_val + "\n"
     script += "TIER0_TMPFS_GB=" + tier0_tmpfs_gb_val + "\n"
+    script += "TIER2_FS='" + tier2_fs_val + "'\n"
     script += "\n"
 
     script += "wait_for_mountpoint() {\n"
@@ -230,6 +242,34 @@ def combined_boot_script():
     script += "}\n"
     script += "\n"
 
+    script += "reformat_blockstore() {\n"
+    script += '  local mountpoint="$1"\n'
+    script += '  local fs_type="$2"\n'
+    script += '  local dev=""\n'
+    script += '  wait_for_mountpoint "$mountpoint"\n'
+    script += '  dev="$(findmnt -n -o SOURCE --target "$mountpoint")"\n'
+    script += '  if [ -z "$dev" ]; then\n'
+    script += '    echo "ERROR: could not determine backing device for $mountpoint"\n'
+    script += '    exit 1\n'
+    script += "  fi\n"
+    script += '  echo "Reformatting $dev mounted at $mountpoint as $fs_type"\n'
+    script += '  sudo umount "$mountpoint"\n'
+    script += '  if [ "$fs_type" = "xfs" ]; then\n'
+    script += '    sudo mkfs.xfs -f "$dev"\n'
+    script += '    sudo mount -t xfs "$dev" "$mountpoint"\n'
+    script += '  elif [ "$fs_type" = "ext4" ]; then\n'
+    script += '    sudo mkfs.ext4 -F "$dev"\n'
+    script += '    sudo mount -t ext4 "$dev" "$mountpoint"\n'
+    script += "  else\n"
+    script += '    echo "ERROR: unsupported filesystem type $fs_type"\n'
+    script += '    exit 1\n'
+    script += "  fi\n"
+    script += '  wait_for_mountpoint "$mountpoint"\n'
+    script += '  sudo chown "${CLOUDLAB_USER}" "$mountpoint" || true\n'
+    script += '  sudo chmod 755 "$mountpoint" || true\n'
+    script += "}\n"
+    script += "\n"
+
     script += "write_tier_conf() {\n"
     script += '  local tier_idx="$1"\n'
     script += '  local mount_base="$2"\n'
@@ -267,9 +307,9 @@ def combined_boot_script():
 
     script += 'if [ "$NUM_TIERS" -ge 3 ]; then\n'
     script += '  prepare_tier_dir /tier2 /tier2/data\n'
+    script += '  reformat_blockstore /tier2/data "$TIER2_FS"\n'
     script += '  write_tier_conf 2 /tier2 /tier2/data "blockstore" ""\n'
     script += "fi\n"
-    script += "\n"
 
     script += 'if [ "$NUM_TIERS" -ge 4 ]; then\n'
     script += '  prepare_tier_dir /tier3 /tier3/data\n'
