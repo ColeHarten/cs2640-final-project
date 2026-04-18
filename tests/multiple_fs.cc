@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -130,6 +132,12 @@ void ensure_tier_ready(const fs::path& root, const std::string& name) {
     }
 
     std::cerr << "  fs_magic: 0x" << std::hex << fs_magic_for(root) << std::dec << "\n";
+
+    if (::access(root.c_str(), W_OK) != 0) {
+        throw std::runtime_error("tier root is not writable: " + root.string() +
+                                 " errno=" + std::to_string(errno) +
+                                 " (" + std::string(std::strerror(errno)) + ")");
+    }
 }
 
 std::vector<BlockLocation> sorted_locs(MetadataStore& metadata,

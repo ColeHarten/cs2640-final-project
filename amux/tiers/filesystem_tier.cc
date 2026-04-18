@@ -1,8 +1,49 @@
 #include "filesystem_tier.hh"
 
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
 #include <fstream>
+#include <sstream>
+#include <unistd.h>
 
 namespace asyncmux {
+
+namespace {
+
+std::string io_error_with_context(const char* what,
+                                             const std::filesystem::path& path,
+                                             int saved_errno,
+                                             const char* file,
+                                             int line,
+                                             const char* function) {
+     std::ostringstream os;
+     os << what
+         << " | path='" << path.string() << "'"
+         << " | errno=" << saved_errno
+         << " (" << std::strerror(saved_errno) << ")"
+         << " | at " << file << ":" << line
+         << " in " << function;
+     return os.str();
+}
+
+std::string fs_error_with_context(const char* what,
+                                             const std::filesystem::path& path,
+                                             const std::error_code& ec,
+                                             const char* file,
+                                             int line,
+                                             const char* function) {
+     std::ostringstream os;
+     os << what
+         << " | path='" << path.string() << "'"
+         << " | error=" << ec.value()
+         << " (" << ec.message() << ")"
+         << " | at " << file << ":" << line
+         << " in " << function;
+     return os.str();
+}
+
+} // namespace
 
 FileSystemTier::FileSystemTier(TierId id,
                                std::string name,
@@ -12,7 +53,16 @@ FileSystemTier::FileSystemTier(TierId id,
       name_(std::move(name)),
       root_dir_(std::move(root_dir)),
       pool_(pool) {
-    std::filesystem::create_directories(root_dir_);
+        std::error_code ec;
+        std::filesystem::create_directories(root_dir_, ec);
+        if (ec) {
+                throw IoError(fs_error_with_context("filesystem tier root setup failed",
+                                                                                        root_dir_,
+                                                                                        ec,
+                                                                                        __FILE__,
+                                                                                        __LINE__,
+                                                                                        __func__));
+        }
 }
 
 TierId FileSystemTier::id() const {
@@ -34,7 +84,16 @@ std::filesystem::path FileSystemTier::full_path(const std::string& relative_path
 void FileSystemTier::ensure_parent_dirs(const std::filesystem::path& p) const {
     const auto parent = p.parent_path();
     if (!parent.empty()) {
-        std::filesystem::create_directories(parent);
+        std::error_code ec;
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            throw IoError(fs_error_with_context("write_at: failed to create parent directories",
+                                                parent,
+                                                ec,
+                                                __FILE__,
+                                                __LINE__,
+                                                __func__));
+        }
     }
 }
 
@@ -65,13 +124,25 @@ cppcoro::task<IoBuffer> FileSystemTier::read_at(const std::string& relative_path
 
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        throw IoError("read_at: failed to open file");
+        const int saved_errno = errno;
+        throw IoError(io_error_with_context("read_at: failed to open file",
+                                            path,
+                                            saved_errno,
+                                            __FILE__,
+                                            __LINE__,
+                                            __func__));
     }
 
     in.seekg(0, std::ios::end);
     const auto end_pos = in.tellg();
     if (end_pos < 0) {
-        throw IoError("read_at: failed to determine file size");
+        const int saved_errno = errno;
+        throw IoError(io_error_with_context("read_at: failed to determine file size",
+                                            path,
+                                            saved_errno,
+                                            __FILE__,
+                                            __LINE__,
+                                            __func__));
     }
     const auto file_size = static_cast<uint64_t>(end_pos);
 
@@ -84,7 +155,13 @@ cppcoro::task<IoBuffer> FileSystemTier::read_at(const std::string& relative_path
     in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(readable));
 
     if (in.bad()) {
-        throw IoError("read_at: failed during read");
+        const int saved_errno = errno;
+        throw IoError(io_error_with_context("read_at: failed during read",
+                                            path,
+                                            saved_errno,
+                                            __FILE__,
+                                            __LINE__,
+                                            __func__));
     }
 
     co_return IoBuffer{std::move(out)};
@@ -103,16 +180,28 @@ cppcoro::task<void> FileSystemTier::write_at(const std::string& relative_path,
 
     std::fstream io(path, std::ios::binary | std::ios::in | std::ios::out);
     if (!io) {
-        std::ofstream create(path, std::ios::binary);
-        if (!create) {
-            throw IoError("write_at: failed to create file");
+        const int fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0666);
+        if (fd < 0) {
+            const int saved_errno = errno;
+            throw IoError(io_error_with_context("write_at: failed to create file",
+                                                path,
+                                                saved_errno,
+                                                __FILE__,
+                                                __LINE__,
+                                                __func__));
         }
-        create.close();
+        ::close(fd);
         io.open(path, std::ios::binary | std::ios::in | std::ios::out);
     }
 
     if (!io) {
-        throw IoError("write_at: failed to open file");
+        const int saved_errno = errno;
+        throw IoError(io_error_with_context("write_at: failed to open file",
+                                            path,
+                                            saved_errno,
+                                            __FILE__,
+                                            __LINE__,
+                                            __func__));
     }
 
     io.seekp(static_cast<std::streamoff>(offset), std::ios::beg);
@@ -121,7 +210,13 @@ cppcoro::task<void> FileSystemTier::write_at(const std::string& relative_path,
     io.flush();
 
     if (!io) {
-        throw IoError("write_at: failed during write");
+        const int saved_errno = errno;
+        throw IoError(io_error_with_context("write_at: failed during write",
+                                            path,
+                                            saved_errno,
+                                            __FILE__,
+                                            __LINE__,
+                                            __func__));
     }
 
     co_return;
@@ -137,7 +232,12 @@ cppcoro::task<void> FileSystemTier::remove_file(const std::string& relative_path
     std::error_code ec;
     std::filesystem::remove(path, ec);
     if (ec) {
-        throw IoError("remove_file: failed to remove file");
+        throw IoError(fs_error_with_context("remove_file: failed to remove file",
+                                            path,
+                                            ec,
+                                            __FILE__,
+                                            __LINE__,
+                                            __func__));
     }
 
     co_return;
