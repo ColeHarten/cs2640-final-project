@@ -464,12 +464,10 @@ int main() {
                   << kColorReset << "\n";
         return 0;
     } catch (const std::exception& ex) {
-        std::cerr << kColorRed << "FAIL:" << kColorReset
-                  << " uncaught exception: " << ex.what() << "\n";
+        log_uncaught_exception(ex, __FILE__, __LINE__, __func__);
         return 1;
     } catch (...) {
-        std::cerr << kColorRed << "FAIL:" << kColorReset
-                  << " uncaught non-standard exception\n";
+        log_uncaught_nonstd(__FILE__, __LINE__, __func__);
         return 1;
     }
 }
