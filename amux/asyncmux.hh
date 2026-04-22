@@ -11,11 +11,15 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
+#include <queue>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <stdexcept>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "span.hh"
@@ -94,6 +98,10 @@ public:
                                          uint64_t offset,
                                          asyncmux::span<const Byte> data) = 0;
 
+    virtual cppcoro::task<void> punch_hole(const std::string& relative_path,
+                                           uint64_t offset,
+                                           uint64_t size) = 0;
+
     virtual cppcoro::task<void> remove_file(const std::string& relative_path) = 0;
 };
 
@@ -125,6 +133,10 @@ public:
                                  uint64_t offset,
                                  asyncmux::span<const Byte> data) override;
 
+    cppcoro::task<void> punch_hole(const std::string& relative_path,
+                                   uint64_t offset,
+                                   uint64_t size) override;
+
     cppcoro::task<void> remove_file(const std::string& relative_path) override;
 
 private:
@@ -150,7 +162,10 @@ public:
              MetadataStore& metadata,
              PlacementPolicy& placement,
              cppcoro::static_thread_pool& pool,
-             bool auto_migration_enabled = false);
+             bool auto_migration_enabled = false,
+             TierId hot_tier_id = 0);
+
+    ~AsyncMux();
 
     cppcoro::task<IoBuffer> read(const std::string& path,
                                  uint64_t offset,
@@ -177,12 +192,23 @@ private:
                       uint64_t read_offset,
                       uint64_t read_size);
 
+    void enqueue_background_promotion(BlockId block_id);
+    void background_worker_loop();
+
     TierRegistry& tiers_;
     MetadataStore& metadata_;
     PlacementPolicy& placement_;
     cppcoro::static_thread_pool& pool_;
     BlockAllocator allocator_;
     bool auto_migration_enabled_ = false;
+    TierId hot_tier_id_ = 0;
+
+    std::thread bg_thread_;
+    std::mutex bg_mu_;
+    std::condition_variable bg_cv_;
+    std::queue<BlockId> bg_queue_;
+    std::unordered_set<BlockId> bg_queued_;
+    bool bg_stop_ = false;
 };
 
 class MetadataStore {
@@ -225,6 +251,7 @@ private:
     mutable std::shared_mutex mu_;
     std::unordered_map<std::string, FileEntry> file_map_;
     std::unordered_map<BlockId, BlockIndexEntry> block_index_;
+    BlockAllocator extent_allocator_;
 };
 
 class PlacementPolicy {
