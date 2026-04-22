@@ -505,6 +505,55 @@ TierId ConstantPlacementPolicy::choose_tier(const WriteBlock&) {
     return default_tier_;
 }
 
+void AsyncMux::PromotionQueue::push(BlockId block_id) {
+    bool wake = false;
+    {
+        std::lock_guard<std::mutex> guard(mu_);
+        if (stopping_) {
+            return;
+        }
+
+        queue_.push(block_id);
+        wake = true;
+    }
+
+    if (wake) {
+        has_item_.set();
+    }
+}
+
+void AsyncMux::PromotionQueue::stop() noexcept {
+    bool wake = false;
+    {
+        std::lock_guard<std::mutex> guard(mu_);
+        stopping_ = true;
+        wake = true;
+    }
+
+    if (wake) {
+        has_item_.set();
+    }
+}
+
+cppcoro::task<std::optional<BlockId>> AsyncMux::PromotionQueue::pop() {
+    while (true) {
+        {
+            std::lock_guard<std::mutex> guard(mu_);
+            if (!queue_.empty()) {
+                BlockId block_id = queue_.front();
+                queue_.pop();
+                co_return block_id;
+            }
+
+            if (stopping_) {
+                co_return std::nullopt;
+            }
+        }
+
+        co_await has_item_;
+    }
+}
+
 AsyncMux::AsyncMux(TierRegistry& tiers,
                    MetadataStore& metadata,
                    PlacementPolicy& placement,
@@ -518,19 +567,14 @@ AsyncMux::AsyncMux(TierRegistry& tiers,
       auto_migration_enabled_(auto_migration_enabled),
       hot_tier_id_(hot_tier_id) {
     if (auto_migration_enabled_) {
-        bg_thread_ = std::thread([this] { background_worker_loop(); });
+        bg_scope_.spawn(background_loop());
     }
 }
 
 AsyncMux::~AsyncMux() {
-    {
-        std::lock_guard<std::mutex> guard(bg_mu_);
-        bg_stop_ = true;
-    }
-    bg_cv_.notify_all();
-    if (bg_thread_.joinable()) {
-        bg_thread_.join();
-    }
+    stopping_.store(true, std::memory_order_release);
+    promotion_queue_.stop();
+    cppcoro::sync_wait(bg_scope_.join());
 }
 
 void AsyncMux::enqueue_background_promotion(BlockId block_id) {
@@ -538,32 +582,22 @@ void AsyncMux::enqueue_background_promotion(BlockId block_id) {
         return;
     }
 
-    std::lock_guard<std::mutex> guard(bg_mu_);
-    const auto [_, inserted] = bg_queued_.insert(block_id);
-    if (inserted) {
-        bg_queue_.push(block_id);
-        bg_cv_.notify_one();
-    }
+    promotion_queue_.push(block_id);
 }
 
-void AsyncMux::background_worker_loop() {
-    while (true) {
-        BlockId block_id = 0;
-        {
-            std::unique_lock<std::mutex> lock(bg_mu_);
-            bg_cv_.wait(lock, [&] { return bg_stop_ || !bg_queue_.empty(); });
-            if (bg_stop_ && bg_queue_.empty()) {
-                return;
-            }
-            block_id = bg_queue_.front();
-            bg_queue_.pop();
-            bg_queued_.erase(block_id);
+cppcoro::task<void> AsyncMux::background_loop() {
+    co_await pool_.schedule();
+
+    while (!stopping_.load(std::memory_order_acquire)) {
+        auto block_id = co_await promotion_queue_.pop();
+        if (!block_id || stopping_.load(std::memory_order_acquire)) {
+            co_return;
         }
 
         try {
-            const TierId current = metadata_.tier_of(block_id);
+            const TierId current = metadata_.tier_of(*block_id);
             if (current != hot_tier_id_) {
-                cppcoro::sync_wait(promote(block_id, hot_tier_id_));
+                co_await promote(*block_id, hot_tier_id_);
             }
         } catch (...) {
             // Best effort background promotion. Foreground requests remain authoritative.

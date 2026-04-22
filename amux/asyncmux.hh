@@ -2,6 +2,8 @@
 #define ASYNC_MUX_HH
 
 #include <cppcoro/static_thread_pool.hpp>
+#include <cppcoro/async_scope.hpp>
+#include <cppcoro/single_consumer_async_auto_reset_event.hpp>
 #include <cppcoro/task.hpp>
 #include <cppcoro/when_all.hpp>
 
@@ -11,7 +13,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
-#include <condition_variable>
+#include <optional>
 #include <queue>
 #include <shared_mutex>
 #include <unordered_map>
@@ -19,7 +21,6 @@
 #include <stdexcept>
 #include <span>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "span.hh"
@@ -152,17 +153,13 @@ private:
     mutable std::unordered_map<std::string, std::shared_ptr<std::shared_mutex>> file_locks_;
 };
 
-} // namespace asyncmux
-
-namespace asyncmux {
-
 class AsyncMux {
 public:
     AsyncMux(TierRegistry& tiers,
              MetadataStore& metadata,
              PlacementPolicy& placement,
              cppcoro::static_thread_pool& pool,
-             bool auto_migration_enabled = false,
+             bool auto_migration_enabled = true,
              TierId hot_tier_id = 0);
 
     ~AsyncMux();
@@ -180,6 +177,19 @@ public:
     cppcoro::task<void> promote(BlockId block_id, TierId hot_tier);
 
 private:
+    class PromotionQueue {
+    public:
+        void push(BlockId block_id);
+        void stop() noexcept;
+        cppcoro::task<std::optional<BlockId>> pop();
+
+    private:
+        std::mutex mu_;
+        std::queue<BlockId> queue_;
+        cppcoro::single_consumer_async_auto_reset_event has_item_{false};
+        bool stopping_ = false;
+    };
+
     struct PreparedWrite {
         WriteBlock block;
         TierId tier_id;
@@ -193,22 +203,19 @@ private:
                       uint64_t read_size);
 
     void enqueue_background_promotion(BlockId block_id);
-    void background_worker_loop();
+    cppcoro::task<void> background_loop();
 
     TierRegistry& tiers_;
     MetadataStore& metadata_;
     PlacementPolicy& placement_;
     cppcoro::static_thread_pool& pool_;
+    cppcoro::async_scope bg_scope_;
     BlockAllocator allocator_;
     bool auto_migration_enabled_ = false;
     TierId hot_tier_id_ = 0;
 
-    std::thread bg_thread_;
-    std::mutex bg_mu_;
-    std::condition_variable bg_cv_;
-    std::queue<BlockId> bg_queue_;
-    std::unordered_set<BlockId> bg_queued_;
-    bool bg_stop_ = false;
+    PromotionQueue promotion_queue_;
+    std::atomic<bool> stopping_{false};
 };
 
 class MetadataStore {
