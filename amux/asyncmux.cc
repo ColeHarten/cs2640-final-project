@@ -505,12 +505,12 @@ TierId ConstantPlacementPolicy::choose_tier(const WriteBlock&) {
     return default_tier_;
 }
 
-void AsyncMux::PromotionQueue::push(BlockId block_id) {
+bool AsyncMux::PromotionQueue::push(BlockId block_id) {
     bool wake = false;
     {
         std::lock_guard<std::mutex> guard(mu_);
         if (stopping_) {
-            return;
+            return false;
         }
 
         queue_.push(block_id);
@@ -520,6 +520,8 @@ void AsyncMux::PromotionQueue::push(BlockId block_id) {
     if (wake) {
         has_item_.set();
     }
+
+    return true;
 }
 
 void AsyncMux::PromotionQueue::stop() noexcept {
@@ -577,12 +579,28 @@ AsyncMux::~AsyncMux() {
     cppcoro::sync_wait(bg_scope_.join());
 }
 
+bool AsyncMux::mark_promotion_queued(BlockId block_id) {
+    std::lock_guard<std::mutex> guard(promotion_dedup_mu_);
+    return queued_or_inflight_.insert(block_id).second;
+}
+
+void AsyncMux::clear_promotion_queued(BlockId block_id) {
+    std::lock_guard<std::mutex> guard(promotion_dedup_mu_);
+    queued_or_inflight_.erase(block_id);
+}
+
 void AsyncMux::enqueue_background_promotion(BlockId block_id) {
     if (!auto_migration_enabled_) {
         return;
     }
 
-    promotion_queue_.push(block_id);
+    if (!mark_promotion_queued(block_id)) {
+        return;
+    }
+
+    if (!promotion_queue_.push(block_id)) {
+        clear_promotion_queued(block_id);
+    }
 }
 
 cppcoro::task<void> AsyncMux::background_loop() {
@@ -602,6 +620,8 @@ cppcoro::task<void> AsyncMux::background_loop() {
         } catch (...) {
             // Best effort background promotion. Foreground requests remain authoritative.
         }
+
+        clear_promotion_queued(*block_id);
     }
 }
 

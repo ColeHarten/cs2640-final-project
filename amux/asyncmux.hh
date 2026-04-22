@@ -179,7 +179,7 @@ public:
 private:
     class PromotionQueue {
     public:
-        void push(BlockId block_id);
+        bool push(BlockId block_id);
         void stop() noexcept;
         cppcoro::task<std::optional<BlockId>> pop();
 
@@ -202,6 +202,9 @@ private:
                       uint64_t read_offset,
                       uint64_t read_size);
 
+    bool mark_promotion_queued(BlockId block_id);
+    void clear_promotion_queued(BlockId block_id);
+
     void enqueue_background_promotion(BlockId block_id);
     cppcoro::task<void> background_loop();
 
@@ -211,10 +214,12 @@ private:
     cppcoro::static_thread_pool& pool_;
     cppcoro::async_scope bg_scope_;
     BlockAllocator allocator_;
-    bool auto_migration_enabled_ = false;
-    TierId hot_tier_id_ = 0;
+    bool auto_migration_enabled_;
+    TierId hot_tier_id_;
 
     PromotionQueue promotion_queue_;
+    std::mutex promotion_dedup_mu_;
+    std::unordered_set<BlockId> queued_or_inflight_;
     std::atomic<bool> stopping_{false};
 };
 
@@ -229,8 +234,6 @@ public:
                 TierId tier_id,
                 uint64_t file_offset,
                 uint64_t size);
-
-    void update_block(BlockId block_id, TierId new_tier);
 
     void relocate_block(BlockId block_id, TierId new_tier);
 
@@ -289,7 +292,7 @@ public:
     }
 
 private:
-    TierId tier_;
+    std::atomic<TierId> tier_;
 };
 
 class FuseFrontend {
