@@ -73,7 +73,7 @@ constexpr long kExtMagic   = 0xEF53;
 constexpr long kXfsMagic   = 0x58465342;
 
 // ------------------------------------------------------------
-// Environment setup helpers (mirrors your correctness fixture)
+// Environment setup helpers 
 // ------------------------------------------------------------
 
 long fs_magic_for(const fs::path& root) {
@@ -194,7 +194,7 @@ std::vector<BlockLocation> sorted_locs(MetadataStore& metadata,
 }
 
 // ------------------------------------------------------------
-// Benchmark config / reporting
+// Benchmark config
 // ------------------------------------------------------------
 
 struct BenchmarkConfig {
@@ -362,17 +362,7 @@ struct Fixture {
 };
 
 // ------------------------------------------------------------
-// Adapter contract
-//
-// Required methods:
-//
-//   std::string name() const;
-//   task<void> write(path, off, span<const Byte>);
-//   task<IoBuffer> read(path, off, size);
-//   task<void> migrate(block_id, src, dst);
-//   task<void> promote(block_id, dst);
-//   std::vector<BlockLocation> lookup(path, off, size);
-//   void set_default_tier(TierId);
+// Async benchmark adapter
 // ------------------------------------------------------------
 
 struct AsyncMuxAdapter {
@@ -411,54 +401,6 @@ struct AsyncMuxAdapter {
     }
 };
 
-/*
-Example blocking adapter shape.
-
-Replace BlockingMux with your actual synchronous baseline type, then
-make each method call the blocking operation directly and co_return.
-
-struct BlockingMuxAdapter {
-    Fixture& fx;
-    BlockingMux baseline;
-
-    explicit BlockingMuxAdapter(Fixture& f)
-        : fx(f), baseline(fx.tiers, fx.metadata, fx.placement) {}
-
-    std::string name() const { return "blocking"; }
-
-    void set_default_tier(TierId tier) { fx.placement.set(tier); }
-
-    task<void> write(const std::string& path,
-                     std::uint64_t offset,
-                     asyncmux::span<const Byte> bytes) {
-        baseline.write(path, offset, bytes);
-        co_return;
-    }
-
-    task<IoBuffer> read(const std::string& path,
-                        std::uint64_t offset,
-                        std::uint64_t size) {
-        co_return baseline.read(path, offset, size);
-    }
-
-    task<void> migrate(std::uint64_t block_id, TierId src, TierId dst) {
-        baseline.migrate(block_id, src, dst);
-        co_return;
-    }
-
-    task<void> promote(std::uint64_t block_id, TierId dst) {
-        baseline.promote(block_id, dst);
-        co_return;
-    }
-
-    std::vector<BlockLocation> lookup(const std::string& path,
-                                      std::uint64_t offset,
-                                      std::uint64_t size) {
-        return sorted_locs(fx.metadata, path, offset, size);
-    }
-};
-*/
-
 // ------------------------------------------------------------
 // Utilities
 // ------------------------------------------------------------
@@ -483,7 +425,7 @@ std::uint64_t random_aligned_offset(std::mt19937_64& rng,
     return static_cast<std::uint64_t>(slot * io_size);
 }
 
-task<void> prepopulate_file(auto& adapter,
+task<void> prepopulate_file(AsyncMuxAdapter& adapter,
                             const std::string& path,
                             std::size_t file_size,
                             std::uint64_t seed,
@@ -552,8 +494,7 @@ task<BenchmarkResult> run_concurrent_workload(
 // Workloads
 // ------------------------------------------------------------
 
-template <typename Adapter>
-task<BenchmarkResult> benchmark_sequential_write(Adapter& adapter,
+task<BenchmarkResult> benchmark_sequential_write(AsyncMuxAdapter& adapter,
                                                  Fixture& fx,
                                                  const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("seq_write.dat");
@@ -577,8 +518,7 @@ task<BenchmarkResult> benchmark_sequential_write(Adapter& adapter,
         });
 }
 
-template <typename Adapter>
-task<BenchmarkResult> benchmark_sequential_read(Adapter& adapter,
+task<BenchmarkResult> benchmark_sequential_read(AsyncMuxAdapter& adapter,
                                                 Fixture& fx,
                                                 const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("seq_read.dat");
@@ -601,8 +541,7 @@ task<BenchmarkResult> benchmark_sequential_read(Adapter& adapter,
         });
 }
 
-template <typename Adapter>
-task<BenchmarkResult> benchmark_random_read(Adapter& adapter,
+task<BenchmarkResult> benchmark_random_read(AsyncMuxAdapter& adapter,
                                             Fixture& fx,
                                             const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("rand_read.dat");
@@ -626,8 +565,7 @@ task<BenchmarkResult> benchmark_random_read(Adapter& adapter,
         });
 }
 
-template <typename Adapter>
-task<BenchmarkResult> benchmark_random_write(Adapter& adapter,
+task<BenchmarkResult> benchmark_random_write(AsyncMuxAdapter& adapter,
                                              Fixture& fx,
                                              const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("rand_write.dat");
@@ -655,8 +593,7 @@ task<BenchmarkResult> benchmark_random_write(Adapter& adapter,
         });
 }
 
-template <typename Adapter>
-task<BenchmarkResult> benchmark_mixed_rw(Adapter& adapter,
+task<BenchmarkResult> benchmark_mixed_rw(AsyncMuxAdapter& adapter,
                                          Fixture& fx,
                                          const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("mixed_rw.dat");
@@ -689,8 +626,7 @@ task<BenchmarkResult> benchmark_mixed_rw(Adapter& adapter,
         });
 }
 
-template <typename Adapter>
-task<BenchmarkResult> benchmark_fanout_read(Adapter& adapter,
+task<BenchmarkResult> benchmark_fanout_read(AsyncMuxAdapter& adapter,
                                             Fixture& fx,
                                             const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("fanout_read.dat");
@@ -728,8 +664,7 @@ task<BenchmarkResult> benchmark_fanout_read(Adapter& adapter,
         });
 }
 
-template <typename Adapter>
-task<BenchmarkResult> benchmark_background_migration(Adapter& adapter,
+task<BenchmarkResult> benchmark_background_migration(AsyncMuxAdapter& adapter,
                                                      Fixture& fx,
                                                      const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("migration_bg.dat");
@@ -799,8 +734,7 @@ task<BenchmarkResult> benchmark_background_migration(Adapter& adapter,
 // Runner
 // ------------------------------------------------------------
 
-template <typename Adapter>
-task<void> run_suite(Adapter& adapter, Fixture& fx, const BenchmarkConfig& cfg) {
+task<void> run_suite(AsyncMuxAdapter& adapter, Fixture& fx, const BenchmarkConfig& cfg) {
     if (cfg.csv) {
         std::cout
             << "backend,workload,ops,total_bytes,concurrency,seconds,ops_per_sec,"
@@ -877,11 +811,6 @@ int main(int argc, char** argv) {
 
         AsyncMuxAdapter adapter{fx};
         sync_wait(run_suite(adapter, fx, cfg));
-
-        // To run a blocking baseline too, instantiate its adapter here and call run_suite():
-        //
-        // BlockingMuxAdapter blocking{fx};
-        // sync_wait(run_suite(blocking, fx, cfg));
 
         return 0;
     } catch (const std::exception& ex) {
