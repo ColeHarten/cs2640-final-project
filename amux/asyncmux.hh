@@ -8,6 +8,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <shared_mutex>
+#include <unordered_map>
 #include <stdexcept>
 #include <span>
 #include <string>
@@ -119,6 +121,79 @@ private:
     bool auto_migration_enabled_ = false;
 };
 
+class MetadataStore {
+public:
+    std::vector<BlockLocation> lookup(const std::string& path,
+                                      uint64_t offset,
+                                      uint64_t size) const;
+
+    void update(const std::string& path,
+                BlockId block_id,
+                TierId tier_id,
+                uint64_t file_offset,
+                uint64_t size);
+
+    void update_block(BlockId block_id, TierId new_tier);
+
+    void relocate_block(BlockId block_id, TierId new_tier);
+
+    LocatedBlock get_block(BlockId block_id) const;
+
+    TierId tier_of(BlockId block_id) const;
+
+    uint64_t version_of(const std::string& path) const;
+    uint64_t bump_version(const std::string& path);
+
+private:
+    struct FileEntry {
+        std::vector<BlockLocation> extents;
+        uint64_t version = 0;
+    };
+
+    struct BlockIndexEntry {
+        std::string path;
+        uint64_t file_offset = 0;
+        uint64_t size = 0;
+    };
+
+    void rebuild_block_index_locked(const std::string& path);
+
+    mutable std::shared_mutex mu_;
+    std::unordered_map<std::string, FileEntry> file_map_;
+    std::unordered_map<BlockId, BlockIndexEntry> block_index_;
+};
+
+class PlacementPolicy {
+public:
+    virtual ~PlacementPolicy() = default;
+    virtual TierId choose_tier(const WriteBlock& block) = 0;
+};
+
+class ConstantPlacementPolicy final : public PlacementPolicy {
+public:
+    explicit ConstantPlacementPolicy(TierId default_tier);
+    TierId choose_tier(const WriteBlock&) override;
+
+private:
+    TierId default_tier_;
+};
+
+class MutablePlacementPolicy final : public PlacementPolicy {
+public:
+    explicit MutablePlacementPolicy(TierId initial_tier) : tier_(initial_tier) {}
+
+    void set(TierId tier) {
+        tier_ = tier;
+    }
+
+    TierId choose_tier(const WriteBlock&) override {
+        return tier_;
+    }
+
+private:
+    TierId tier_;
+};
+
 class FuseFrontend {
 public:
     explicit FuseFrontend(AsyncMux& mux);
@@ -136,9 +211,6 @@ private:
 };
 
 } // namespace asyncmux
-
-#include "metadata_store.hh"
-#include "placement_policy.hh"
 #include "tier.hh"
 
 #endif

@@ -66,8 +66,6 @@ target_link_libraries(cppcoro_static_thread_pool
 function(add_asyncmux_test target source_file)
     add_executable(${target}
         ${source_file}
-        amux/metadata_store.cc
-        amux/placement_policy.cc
         amux/tier.cc
         amux/asyncmux.cc
     )
