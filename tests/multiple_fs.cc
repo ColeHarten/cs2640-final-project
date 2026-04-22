@@ -19,7 +19,6 @@
 
 #include <sys/stat.h>
 #include <sys/statfs.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 #include "amux/asyncmux.hh"
@@ -134,42 +133,10 @@ void ensure_tier_ready(const fs::path& root, const std::string& name) {
 
     std::cerr << "  fs_magic: 0x" << std::hex << fs_magic_for(root) << std::dec << "\n";
 
-    auto throw_not_writable = [&](int err, const std::string& context) {
-        struct stat st {};
-        std::string perms = "unknown";
-        std::string owner = "unknown";
-        std::string group = "unknown";
-
-        if (::stat(root.c_str(), &st) == 0) {
-            char mode_buf[16] = {};
-            std::snprintf(mode_buf, sizeof(mode_buf), "%04o", st.st_mode & 07777);
-            perms = mode_buf;
-            owner = std::to_string(static_cast<long long>(st.st_uid));
-            group = std::to_string(static_cast<long long>(st.st_gid));
-        }
-
-        throw std::runtime_error(
-            context + ": " + root.string() +
-            " errno=" + std::to_string(err) +
-            " (" + std::string(std::strerror(err)) + ")" +
-            " mode=" + perms +
-            " uid=" + owner +
-            " gid=" + group +
-            " ; remediation: ensure the mount is rw and writable by the test process");
-    };
-
     if (::access(root.c_str(), W_OK) != 0) {
-        const int initial_err = errno;
-
-        if (::chmod(root.c_str(), 0777) != 0) {
-            throw_not_writable(initial_err, "tier root is not writable and chmod repair failed");
-        }
-
-        if (::access(root.c_str(), W_OK) != 0) {
-            throw_not_writable(errno, "tier root is not writable after chmod repair");
-        }
-
-        std::cerr << "  repaired_permissions: true\n";
+        throw std::runtime_error("tier root is not writable: " + root.string() +
+                                 " errno=" + std::to_string(errno) +
+                                 " (" + std::string(std::strerror(errno)) + ")");
     }
 }
 

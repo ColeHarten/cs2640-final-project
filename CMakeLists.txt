@@ -70,7 +70,6 @@ function(add_asyncmux_test target source_file)
         amux/placement_policy.cc
         amux/tier.cc
         amux/asyncmux.cc
-        amux/tiers/filesystem_tier.cc
     )
 
     target_include_directories(${target}
