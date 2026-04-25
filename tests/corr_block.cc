@@ -135,19 +135,6 @@ void cleanup_test_artifacts() {
     fs::remove_all(kColdRoot / "group", ec);
 }
 
-bool wait_until(std::function<bool()> pred,
-                std::chrono::milliseconds timeout = std::chrono::milliseconds(3000),
-                std::chrono::milliseconds poll = std::chrono::milliseconds(10)) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (pred()) {
-            return true;
-        }
-        std::this_thread::sleep_for(poll);
-    }
-    return pred();
-}
-
 struct Fixture {
     ThreadPool pool{8}; // optional standalone pool if you want it available
     TierRegistry tiers;
@@ -326,16 +313,7 @@ void test_background_read_triggers_promotion(Fixture& fx) {
     assert_eq(to_string(out), payload,
               "read should still return correct bytes before background promotion completes");
 
-    const bool promoted = wait_until([&]() {
-        auto now = sorted_locs_blocking(fx.metadata, "/bg_promote", 0, bytes.size());
-        return !now.empty() &&
-               std::all_of(now.begin(), now.end(), [](const BlockLocation& loc) {
-                   return loc.tier_id == 1;
-               });
-    });
-
-    assert_true(promoted,
-                "background promotion should eventually move read blocks back to hot tier");
+    fx.mux.wait_for_background_idle();
 
     auto final_locs = sorted_locs_blocking(fx.metadata, "/bg_promote", 0, bytes.size());
     for (const auto& loc : final_locs) {
@@ -399,22 +377,31 @@ void test_overwrite_replaces_old_extents(Fixture& fx) {
     std::string expected = base;
     expected.replace(static_cast<std::size_t>(patch_off), patch.size(), patch);
 
-    IoBuffer out = fx.mux.read("/overwrite", 0, expected.size());
-    assert_eq(to_string(out), expected,
-              "overwrite should replace old bytes instead of leaving stale overlaps");
-
     auto locs = sorted_locs_blocking(fx.metadata, "/overwrite", 0, expected.size());
     assert_true(!locs.empty(), "overwrite should retain metadata");
     assert_non_overlapping(locs, "overwrite");
 
+    std::uint64_t covered = 0;
     for (const auto& loc : locs) {
-        const bool overlaps_patch = !(loc.file_offset + loc.size <= patch_off ||
-                                      loc.file_offset >= patch_off + patch.size());
-        if (overlaps_patch) {
-            assert_true(loc.tier_id == 2,
-                        "patched extents should now point at the destination tier of the overwrite");
+        const std::uint64_t loc_begin = loc.file_offset;
+        const std::uint64_t loc_end = loc.file_offset + loc.size;
+        const std::uint64_t patch_begin = patch_off;
+        const std::uint64_t patch_end = patch_off + patch.size();
+
+        const std::uint64_t overlap_begin = std::max(loc_begin, patch_begin);
+        const std::uint64_t overlap_end = std::min(loc_end, patch_end);
+
+        if (overlap_begin < overlap_end && loc.tier_id == 2) {
+            covered += (overlap_end - overlap_begin);
         }
     }
+
+    assert_true(covered == patch.size(),
+                "patched byte range should be fully covered by tier-2 extents");
+
+    IoBuffer out = fx.mux.read("/overwrite", 0, expected.size());
+    assert_eq(to_string(out), expected,
+              "overwrite should replace old bytes instead of leaving stale overlaps");
 }
 
 void test_cross_tier_overwrite_and_followup_read(Fixture& fx) {

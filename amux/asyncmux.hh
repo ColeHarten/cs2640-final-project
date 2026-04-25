@@ -273,22 +273,6 @@ private:
     std::unordered_set<BlockId> bg_queued_;
 };
 
-class FuseFrontend {
-public:
-    explicit FuseFrontend(AsyncMux& mux);
-
-    cppcoro::task<IoBuffer> on_read(const std::string& path,
-                                    std::uint64_t offset,
-                                    std::uint64_t size);
-
-    cppcoro::task<void> on_write(const std::string& path,
-                                 std::uint64_t offset,
-                                 span<const std::byte> data);
-
-private:
-    AsyncMux& mux_;
-};
-
 }  // namespace asyncmux
 
 #endif

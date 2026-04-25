@@ -229,6 +229,7 @@ public:
 
     void migrate(BlockId block_id, TierId src_id, TierId dst_id);
     void promote(BlockId block_id, TierId hot_tier);
+    void wait_for_background_idle();
 
 private:
     static std::uint64_t checked_end(std::uint64_t off, std::uint64_t sz);
@@ -252,7 +253,9 @@ private:
     std::thread bg_thread_;
     std::mutex bg_mu_;
     std::condition_variable bg_cv_;
+    std::condition_variable bg_idle_cv_;
     bool bg_stop_ = false;
+    std::size_t bg_active_jobs_ = 0;
     std::queue<BlockId> bg_queue_;
     std::unordered_set<BlockId> bg_queued_;
 };

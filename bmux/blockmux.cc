@@ -586,6 +586,17 @@ void BlockingMux::promote(BlockId block_id, TierId hot_tier) {
     migrate(block_id, cur, hot_tier);
 }
 
+void BlockingMux::wait_for_background_idle() {
+    if (!auto_migration_enabled_) {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(bg_mu_);
+    bg_idle_cv_.wait(lock, [this] {
+        return bg_queue_.empty() && bg_active_jobs_ == 0;
+    });
+}
+
 std::uint64_t BlockingMux::checked_end(std::uint64_t off, std::uint64_t sz) {
     return (sz > UINT64_MAX - off) ? UINT64_MAX : off + sz;
 }
@@ -623,6 +634,7 @@ void BlockingMux::background_loop() {
             block_id = bg_queue_.front();
             bg_queue_.pop();
             bg_queued_.erase(block_id);
+            ++bg_active_jobs_;
         }
 
         try {
@@ -631,6 +643,16 @@ void BlockingMux::background_loop() {
                 promote(block_id, hot_tier_id_);
             }
         } catch (...) {
+        }
+
+        {
+            std::lock_guard<std::mutex> g(bg_mu_);
+            if (bg_active_jobs_ > 0) {
+                --bg_active_jobs_;
+            }
+            if (bg_active_jobs_ == 0 && bg_queue_.empty()) {
+                bg_idle_cv_.notify_all();
+            }
         }
     }
 }

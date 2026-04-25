@@ -753,19 +753,4 @@ IoBuffer AsyncMux::assemble(const std::vector<BlockLocation>& locations,
     return out;
 }
 
-FuseFrontend::FuseFrontend(AsyncMux& mux) : mux_(mux) {}
-
-cppcoro::task<IoBuffer> FuseFrontend::on_read(const std::string& path,
-                                              std::uint64_t offset,
-                                              std::uint64_t size) {
-    co_return co_await mux_.read(path, offset, size);
-}
-
-cppcoro::task<void> FuseFrontend::on_write(const std::string& path,
-                                           std::uint64_t offset,
-                                           span<const std::byte> data) {
-    co_await mux_.write(path, offset, data);
-    co_return;
-}
-
 }  // namespace asyncmux
