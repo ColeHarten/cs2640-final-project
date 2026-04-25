@@ -50,7 +50,7 @@ static_assert(
 #else
     false,
 #endif
-    "perf_blocking.cc requires Linux");
+    __FILE__ " requires Linux");
 
 std::string normalize_test_path(const std::string& path) {
     fs::path p(path);

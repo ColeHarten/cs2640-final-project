@@ -115,12 +115,24 @@ IoBuffer FileSystemTier::read_at(const std::string& relative_path,
         throw IoError("read_at open failed");
     }
 
-    ssize_t n = ::pread(fd, out.data(), size, static_cast<off_t>(offset));
-    int saved = errno;
-    ::close(fd);
-    if (n < 0) {
-        throw IoError(std::string("pread failed: ") + std::strerror(saved));
+    std::size_t done = 0;
+    while (done < size) {
+        ssize_t n = ::pread(fd,
+                            out.data() + done,
+                            size - done,
+                            static_cast<off_t>(offset + done));
+        if (n < 0) {
+            int saved = errno;
+            ::close(fd);
+            throw IoError(std::string("pread failed: ") + std::strerror(saved));
+        }
+        if (n == 0) {
+            break; // EOF, remaining bytes stay zero-filled
+        }
+        done += static_cast<std::size_t>(n);
     }
+
+    ::close(fd);
     return IoBuffer(std::move(out));
 }
 
@@ -285,9 +297,17 @@ void MetadataStore::update(const std::string& path,
     next.push_back({block_id, tier_id, file_offset, size});
     std::sort(next.begin(), next.end(),
               [](const auto& a, const auto& b) { return a.file_offset < b.file_offset; });
+
+    for (const auto& old_loc : file.extents) {
+        block_index_.erase(old_loc.block_id);
+    }
+
     file.extents = std::move(next);
+    for (const auto& loc : file.extents) {
+        block_index_[loc.block_id] = {path, loc.file_offset, loc.size};
+    }
+
     ++file.version;
-    rebuild_block_index_locked(path);
 }
 
 void MetadataStore::relocate_block(BlockId block_id, TierId new_tier) {
@@ -342,32 +362,14 @@ std::uint64_t MetadataStore::checked_end(std::uint64_t off, std::uint64_t sz) {
     return (sz > UINT64_MAX - off) ? UINT64_MAX : off + sz;
 }
 
-void MetadataStore::rebuild_block_index_locked(const std::string& path) {
-    for (auto it = block_index_.begin(); it != block_index_.end();) {
-        if (it->second.path == path) {
-            it = block_index_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
-    auto fit = file_map_.find(path);
-    if (fit == file_map_.end()) {
-        return;
-    }
-    for (const auto& loc : fit->second.extents) {
-        block_index_[loc.block_id] = {path, loc.file_offset, loc.size};
-    }
-}
-
 MutablePlacementPolicy::MutablePlacementPolicy(TierId initial) : tier_(initial) {}
 
 void MutablePlacementPolicy::set(TierId tier) {
-    tier_ = tier;
+    tier_.store(tier, std::memory_order_relaxed);
 }
 
 TierId MutablePlacementPolicy::choose_tier(const WriteBlock&) {
-    return tier_;
+    return tier_.load(std::memory_order_relaxed);
 }
 
 BlockingMux::BlockingMux(TierRegistry& tiers,

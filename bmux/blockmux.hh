@@ -184,7 +184,6 @@ private:
     };
 
     static std::uint64_t checked_end(std::uint64_t off, std::uint64_t sz);
-    void rebuild_block_index_locked(const std::string& path);
 
     mutable std::shared_mutex mu_;
     std::unordered_map<std::string, FileEntry> file_map_;
@@ -201,11 +200,13 @@ public:
 class MutablePlacementPolicy final : public PlacementPolicy {
 public:
     explicit MutablePlacementPolicy(TierId initial);
+
     void set(TierId tier);
+
     TierId choose_tier(const WriteBlock&) override;
 
 private:
-    TierId tier_;
+    std::atomic<TierId> tier_;
 };
 
 class BlockingMux {
@@ -260,6 +261,6 @@ private:
     std::unordered_set<BlockId> bg_queued_;
 };
 
-} // namespace blockingmux
+} // namespace bmux
 
 #endif

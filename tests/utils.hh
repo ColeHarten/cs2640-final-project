@@ -18,6 +18,8 @@
 #include <sys/statfs.h>
 #include <unistd.h>
 
+#include "../span.hh"
+
 #ifdef __linux__
 #include <execinfo.h>
 #endif
