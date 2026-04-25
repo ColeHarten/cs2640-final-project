@@ -1,3 +1,4 @@
+import csv
 import os
 
 import matplotlib
@@ -7,59 +8,124 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+RAW_DIR = "raw"
 OUTDIR = "figs"
 
+SUMMARY_ASYNC = os.path.join(RAW_DIR, "async_summary.csv")
+SUMMARY_BLOCK = os.path.join(RAW_DIR, "block_summary.csv")
 
-# -----------------------------
-# Benchmark data
-# -----------------------------
-workloads = [
+FANOUT_ASYNC = os.path.join(RAW_DIR, "async_fanout_concurrency.csv")
+FANOUT_BLOCK = os.path.join(RAW_DIR, "block_fanout_concurrency.csv")
+
+FGRW_ASYNC = os.path.join(RAW_DIR, "async_foreground_rw_multitier_concurrency.csv")
+FGRW_BLOCK = os.path.join(RAW_DIR, "block_foreground_rw_multitier_concurrency.csv")
+
+WORKLOAD_ORDER = [
     "sequential_write",
     "sequential_read",
     "random_read",
     "random_write",
     "mixed_80r_20w",
     "fanout_read_multitier",
-    "multitier_rw",
+    "foreground_rw_multitier",
 ]
 
-pretty_labels = [
-    "Seq Write",
-    "Seq Read",
-    "Rand Read",
-    "Rand Write",
-    "Mixed 80/20",
-    "Fanout Read",
-    "Multitier RW",
-]
-
-async_data = {
-    "ops_s": np.array([1098.3, 165657.3, 150091.2, 246.9, 1200.4, 227182.4, 5098.2]),
-    "mib_s": np.array([4.3, 647.1, 586.3, 1.0, 4.7, 887.4, 19.9]),
-    "avg_us": np.array([14546.8, 96.1, 106.1, 64752.6, 13289.9, 70.0, 3132.7]),
-    "p50_us": np.array([3915.2, 44.8, 60.4, 12569.2, 5611.7, 29.3, 1133.7]),
-    "p95_us": np.array([14841.3, 65.4, 67.8, 21282.4, 13735.9, 55.1, 3573.8]),
-    "p99_us": np.array([27057.9, 77.3, 78.4, 76936.7, 26687.9, 73.1, 4410.1]),
+PRETTY_LABELS = {
+    "sequential_write": "Seq Write",
+    "sequential_read": "Seq Read",
+    "random_read": "Rand Read",
+    "random_write": "Rand Write",
+    "mixed_80r_20w": "Mixed 80/20",
+    "fanout_read_multitier": "Fanout Read",
+    "foreground_rw_multitier": "Multitier RW",
 }
 
-blocking_data = {
-    "ops_s": np.array([677.3, 179235.6, 185185.0, 200.5, 919.5, 170192.8, 922.2]),
-    "mib_s": np.array([2.6, 700.1, 723.4, 0.8, 3.6, 664.8, 3.6]),
-    "avg_us": np.array([23578.6, 88.2, 85.4, 79756.2, 17396.6, 92.9, 17334.8]),
-    "p50_us": np.array([12038.0, 60.8, 56.9, 31966.9, 10437.2, 75.5, 10351.7]),
-    "p95_us": np.array([60827.7, 209.6, 204.8, 186818.1, 51454.6, 195.9, 46806.4]),
-    "p99_us": np.array([124878.9, 309.9, 302.6, 766773.2, 148680.7, 274.1, 169663.4]),
-}
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def ensure_outdir() -> None:
     os.makedirs(OUTDIR, exist_ok=True)
 
 
 def outpath(filename: str) -> str:
     return os.path.join(OUTDIR, filename)
+
+
+def read_csv_rows(path: str) -> list[dict]:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Missing CSV file: {path}")
+
+    with open(path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    if not rows:
+        raise ValueError(f"CSV file is empty: {path}")
+
+    return rows
+
+
+def parse_numeric_fields(rows: list[dict]) -> list[dict]:
+    int_fields = {"ops", "total_bytes", "concurrency"}
+    float_fields = {
+        "seconds",
+        "ops_per_sec",
+        "mib_per_sec",
+        "avg_us",
+        "p50_us",
+        "p95_us",
+        "p99_us",
+        "max_us",
+    }
+
+    parsed = []
+    for row in rows:
+        out = dict(row)
+        for key in int_fields:
+            if key in out:
+                out[key] = int(float(out[key]))
+        for key in float_fields:
+            if key in out:
+                out[key] = float(out[key])
+        parsed.append(out)
+    return parsed
+
+
+def load_rows(path: str) -> list[dict]:
+    return parse_numeric_fields(read_csv_rows(path))
+
+
+def summary_to_metric_arrays(rows: list[dict], workload_order: list[str]) -> dict[str, np.ndarray]:
+    by_workload = {row["workload"]: row for row in rows}
+
+    missing = [w for w in workload_order if w not in by_workload]
+    if missing:
+        raise ValueError(f"Missing workloads in summary CSV: {missing}")
+
+    metrics = {}
+    metric_keys = [
+        "ops_per_sec",
+        "mib_per_sec",
+        "avg_us",
+        "p50_us",
+        "p95_us",
+        "p99_us",
+        "max_us",
+    ]
+
+    for key in metric_keys:
+        metrics[key] = np.array([by_workload[w][key] for w in workload_order], dtype=float)
+
+    return metrics
+
+
+def sweep_to_xy(rows: list[dict], expected_workload: str, y_key: str) -> tuple[np.ndarray, np.ndarray]:
+    filtered = [r for r in rows if r["workload"] == expected_workload]
+    if not filtered:
+        raise ValueError(f"No rows found for workload '{expected_workload}'")
+
+    filtered.sort(key=lambda r: r["concurrency"])
+    x = np.array([r["concurrency"] for r in filtered], dtype=int)
+    y = np.array([r[y_key] for r in filtered], dtype=float)
+    return x, y
 
 
 def grouped_bar_chart(labels, a_vals, b_vals, ylabel, title, filename, logy=False):
@@ -122,6 +188,23 @@ def latency_triptych(labels, a_p50, a_p95, a_p99, b_p50, b_p95, b_p99, filename)
     plt.close(fig)
 
 
+def line_chart_two_series(x1, y1, x2, y2, ylabel, title, filename, label1="AsyncMux", label2="BlockingMux", logy=False):
+    fig, ax = plt.subplots(figsize=(8.5, 4.8))
+    ax.plot(x1, y1, marker="o", label=label1)
+    ax.plot(x2, y2, marker="o", label=label2)
+    ax.set_xlabel("Concurrency")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xticks(sorted(set(x1.tolist()) | set(x2.tolist())))
+    if logy:
+        ax.set_yscale("log")
+    ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(outpath(filename), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
 def focused_comparison(indices, labels, metric_async, metric_block, ylabel, title, filename, logy=False):
     sel_labels = [labels[i] for i in indices]
     a_vals = metric_async[indices]
@@ -132,24 +215,41 @@ def focused_comparison(indices, labels, metric_async, metric_block, ylabel, titl
 def main():
     ensure_outdir()
 
+    async_summary_rows = load_rows(SUMMARY_ASYNC)
+    block_summary_rows = load_rows(SUMMARY_BLOCK)
+
+    async_fanout_rows = load_rows(FANOUT_ASYNC)
+    block_fanout_rows = load_rows(FANOUT_BLOCK)
+
+    async_fgrw_rows = load_rows(FGRW_ASYNC)
+    block_fgrw_rows = load_rows(FGRW_BLOCK)
+
+    async_data = summary_to_metric_arrays(async_summary_rows, WORKLOAD_ORDER)
+    blocking_data = summary_to_metric_arrays(block_summary_rows, WORKLOAD_ORDER)
+
+    pretty_labels = [PRETTY_LABELS[w] for w in WORKLOAD_ORDER]
+
+    # 1. Throughput by workload
     grouped_bar_chart(
         pretty_labels,
-        async_data["ops_s"],
-        blocking_data["ops_s"],
+        async_data["ops_per_sec"],
+        blocking_data["ops_per_sec"],
         ylabel="Throughput (ops/s)",
         title="Throughput comparison across workloads",
         filename="fig_throughput_ops.png",
     )
 
+    # Optional bandwidth figure
     grouped_bar_chart(
         pretty_labels,
-        async_data["mib_s"],
-        blocking_data["mib_s"],
+        async_data["mib_per_sec"],
+        blocking_data["mib_per_sec"],
         ylabel="Bandwidth (MiB/s)",
         title="Bandwidth comparison across workloads",
         filename="fig_bandwidth_mib.png",
     )
 
+    # Optional average latency figure
     grouped_bar_chart(
         pretty_labels,
         async_data["avg_us"],
@@ -160,6 +260,7 @@ def main():
         logy=True,
     )
 
+    # 2. p99 latency by workload
     grouped_bar_chart(
         pretty_labels,
         async_data["p99_us"],
@@ -170,6 +271,7 @@ def main():
         logy=True,
     )
 
+    # Optional latency summary
     latency_triptych(
         pretty_labels,
         async_data["p50_us"],
@@ -181,7 +283,8 @@ def main():
         filename="fig_latency_summary.png",
     )
 
-    speedup_ops = async_data["ops_s"] / blocking_data["ops_s"]
+    # Optional speedup figures
+    speedup_ops = async_data["ops_per_sec"] / blocking_data["ops_per_sec"]
     grouped_bar_chart_single_series(
         pretty_labels,
         speedup_ops,
@@ -199,14 +302,15 @@ def main():
         filename="fig_speedup_p99.png",
     )
 
+    # Optional focused summary figures
     read_heavy_indices = [1, 2, 5]
     write_heavy_indices = [0, 3, 4, 6]
 
     focused_comparison(
         read_heavy_indices,
         pretty_labels,
-        async_data["ops_s"],
-        blocking_data["ops_s"],
+        async_data["ops_per_sec"],
+        blocking_data["ops_per_sec"],
         ylabel="Throughput (ops/s)",
         title="Read-heavy workloads",
         filename="fig_read_heavy_ops.png",
@@ -215,8 +319,8 @@ def main():
     focused_comparison(
         write_heavy_indices,
         pretty_labels,
-        async_data["ops_s"],
-        blocking_data["ops_s"],
+        async_data["ops_per_sec"],
+        blocking_data["ops_per_sec"],
         ylabel="Throughput (ops/s)",
         title="Write-heavy and coordination-heavy workloads",
         filename="fig_write_heavy_ops.png",
@@ -233,6 +337,61 @@ def main():
         logy=True,
     )
 
+    # 3. Throughput vs concurrency for fanout
+    fanout_async_x, fanout_async_ops = sweep_to_xy(
+        async_fanout_rows, "fanout_read_multitier", "ops_per_sec"
+    )
+    fanout_block_x, fanout_block_ops = sweep_to_xy(
+        block_fanout_rows, "fanout_read_multitier", "ops_per_sec"
+    )
+
+    line_chart_two_series(
+        fanout_async_x,
+        fanout_async_ops,
+        fanout_block_x,
+        fanout_block_ops,
+        ylabel="Throughput (ops/s)",
+        title="Fanout multitier read throughput vs concurrency",
+        filename="fig_fanout_throughput_vs_concurrency.png",
+    )
+
+    # 4. p99 latency vs concurrency for fanout
+    fanout_async_x, fanout_async_p99 = sweep_to_xy(
+        async_fanout_rows, "fanout_read_multitier", "p99_us"
+    )
+    fanout_block_x, fanout_block_p99 = sweep_to_xy(
+        block_fanout_rows, "fanout_read_multitier", "p99_us"
+    )
+
+    line_chart_two_series(
+        fanout_async_x,
+        fanout_async_p99,
+        fanout_block_x,
+        fanout_block_p99,
+        ylabel="p99 latency (us)",
+        title="Fanout multitier read p99 latency vs concurrency",
+        filename="fig_fanout_p99_vs_concurrency.png",
+        logy=True,
+    )
+
+    # 5. Throughput vs concurrency for foreground multitier RW
+    fgrw_async_x, fgrw_async_ops = sweep_to_xy(
+        async_fgrw_rows, "foreground_rw_multitier", "ops_per_sec"
+    )
+    fgrw_block_x, fgrw_block_ops = sweep_to_xy(
+        block_fgrw_rows, "foreground_rw_multitier", "ops_per_sec"
+    )
+
+    line_chart_two_series(
+        fgrw_async_x,
+        fgrw_async_ops,
+        fgrw_block_x,
+        fgrw_block_ops,
+        ylabel="Throughput (ops/s)",
+        title="Foreground multitier RW throughput vs concurrency",
+        filename="fig_foreground_rw_throughput_vs_concurrency.png",
+    )
+
     print("Saved figures to:", OUTDIR)
     print("  fig_throughput_ops.png")
     print("  fig_bandwidth_mib.png")
@@ -244,8 +403,9 @@ def main():
     print("  fig_read_heavy_ops.png")
     print("  fig_write_heavy_ops.png")
     print("  fig_write_heavy_p99.png")
-    print()
-    print("Note: A true CDF plot requires raw latency samples, not only p50/p95/p99 summaries.")
+    print("  fig_fanout_throughput_vs_concurrency.png")
+    print("  fig_fanout_p99_vs_concurrency.png")
+    print("  fig_foreground_rw_throughput_vs_concurrency.png")
 
 
 if __name__ == "__main__":
