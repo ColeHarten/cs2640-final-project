@@ -5,8 +5,6 @@
 #include <type_traits>
 #include <vector>
 
-namespace asyncmux {
-
 template <typename T>
 class span {
 public:
@@ -46,7 +44,5 @@ private:
     pointer ptr_;
     size_type len_;
 };
-
-} // namespace asyncmux
 
 #endif

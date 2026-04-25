@@ -22,13 +22,6 @@
 #include <execinfo.h>
 #endif
 
-#include "amux/asyncmux.hh"
-
-using asyncmux::BlockLocation;
-using asyncmux::Byte;
-using asyncmux::IoBuffer;
-using asyncmux::MetadataStore;
-
 namespace fs = std::filesystem;
 
 inline const fs::path kHotRoot = "/tier0/tmpfs";
@@ -44,11 +37,11 @@ inline constexpr const char* kColorBoldGreen = "\x1b[1;32m";
 inline constexpr const char* kColorGreen = "\x1b[32m";
 inline constexpr const char* kColorReset = "\x1b[0m";
 
-inline std::vector<Byte> to_bytes(const std::string& s) {
-    std::vector<Byte> out;
+inline std::vector<std::byte> to_bytes(const std::string& s) {
+    std::vector<std::byte> out;
     out.reserve(s.size());
     for (unsigned char ch : s) {
-        out.push_back(static_cast<Byte>(ch));
+        out.push_back(static_cast<std::byte>(ch));
     }
     return out;
 }
@@ -117,22 +110,24 @@ inline std::string normalize_test_path(const std::string& path) {
     return p.string();
 }
 
-inline std::vector<BlockLocation> sorted_locs(MetadataStore& metadata,
-                                              const std::string& path,
-                                              std::uint64_t offset,
-                                              std::uint64_t size) {
+template <typename MetadataStoreT>
+inline auto sorted_locs(MetadataStoreT& metadata,
+                        const std::string& path,
+                        std::uint64_t offset,
+                        std::uint64_t size) {
     auto locs = metadata.lookup(normalize_test_path(path), offset, size);
     std::sort(locs.begin(), locs.end(),
-              [](const BlockLocation& a, const BlockLocation& b) {
+              [](const auto& a, const auto& b) {
                   return a.file_offset < b.file_offset;
               });
     return locs;
 }
 
-inline std::string to_string(const IoBuffer& buf) {
+template <typename IoBufferT>
+inline std::string to_string(const IoBufferT& buf) {
     std::string out;
     out.reserve(buf.data.size());
-    for (Byte b : buf.data) {
+    for (auto b : buf.data) {
         out.push_back(static_cast<char>(b));
     }
     return out;

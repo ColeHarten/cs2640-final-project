@@ -63,6 +63,32 @@ target_link_libraries(cppcoro_static_thread_pool
         Threads::Threads
 )
 
+add_library(bmux STATIC
+    bmux/blockmux.cc
+)
+
+target_include_directories(bmux
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CPPCORO_ROOT}/include
+)
+
+target_compile_options(bmux
+    PRIVATE
+        -stdlib=libc++
+        -fcoroutines-ts
+)
+
+target_link_options(bmux
+    PRIVATE
+        -stdlib=libc++
+)
+
+target_link_libraries(bmux
+    PRIVATE
+        cppcoro_static_thread_pool
+)
+
 function(add_asyncmux_test target source_file)
     add_executable(${target}
         ${source_file}
@@ -104,11 +130,61 @@ function(add_asyncmux_test target source_file)
     )
 endfunction()
 
+function(add_blockmux_test target source_file)
+    add_executable(${target}
+        ${source_file}
+    )
+
+    target_include_directories(${target}
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CPPCORO_ROOT}/include
+    )
+
+    target_compile_options(${target}
+        PRIVATE
+            -stdlib=libc++
+            -fcoroutines-ts
+    )
+
+    target_link_options(${target}
+        PRIVATE
+            -stdlib=libc++
+    )
+
+    if(ENABLE_SANITIZERS)
+        target_compile_options(${target}
+            PRIVATE
+                -fsanitize=address,undefined
+                -fno-omit-frame-pointer
+        )
+        target_link_options(${target}
+            PRIVATE
+                -fsanitize=address,undefined
+        )
+    endif()
+
+    target_link_libraries(${target}
+        PRIVATE
+            bmux
+    )
+endfunction()
+
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cc
 )
 
 foreach(test_source ${TEST_SOURCES})
     get_filename_component(test_target ${test_source} NAME_WE)
-    add_asyncmux_test(${test_target} ${test_source})
+    file(SIZE ${test_source} test_source_size)
+    if(test_source_size EQUAL 0)
+        message(STATUS "Skipping empty test source: ${test_source}")
+        continue()
+    endif()
+
+    if(test_target MATCHES "_block$")
+        add_blockmux_test(${test_target} ${test_source})
+    else()
+        add_asyncmux_test(${test_target} ${test_source})
+    endif()
 endforeach()

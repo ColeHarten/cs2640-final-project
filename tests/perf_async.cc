@@ -35,16 +35,15 @@
 #include <cppcoro/sync_wait.hpp>
 #include <cppcoro/task.hpp>
 
-using asyncmux::AsyncMux;
-using asyncmux::BlockLocation;
-using asyncmux::Byte;
-using asyncmux::FileSystemTier;
-using asyncmux::IoBuffer;
-using asyncmux::MetadataStore;
-using asyncmux::MutablePlacementPolicy;
-using asyncmux::TierId;
-using asyncmux::TierRegistry;
-using asyncmux::kBlockSize;
+using amux::AsyncMux;
+using amux::BlockLocation;
+using amux::FileSystemTier;
+using amux::IoBuffer;
+using amux::MetadataStore;
+using amux::MutablePlacementPolicy;
+using amux::TierId;
+using amux::TierRegistry;
+using amux::kBlockSize;
 
 using cppcoro::static_thread_pool;
 using cppcoro::sync_wait;
@@ -281,7 +280,7 @@ struct AsyncMuxAdapter {
 
     task<void> write(const std::string& path,
                      std::uint64_t offset,
-                     asyncmux::span<const Byte> bytes) {
+                     span<const std::byte> bytes) {
         co_await fx.mux.write(path, offset, bytes);
     }
 
@@ -306,11 +305,11 @@ struct AsyncMuxAdapter {
     }
 };
 
-std::vector<Byte> deterministic_bytes(std::size_t n, std::uint64_t seed) {
-    std::vector<Byte> out(n);
+std::vector<std::byte> deterministic_bytes(std::size_t n, std::uint64_t seed) {
+    std::vector<std::byte> out(n);
     std::mt19937_64 rng(seed);
     for (std::size_t i = 0; i < n; ++i) {
-        out[i] = static_cast<Byte>(rng() & 0xFF);
+        out[i] = static_cast<std::byte>(rng() & 0xFF);
     }
     return out;
 }
@@ -333,7 +332,7 @@ task<void> prepopulate_file(AsyncMuxAdapter& adapter,
                             TierId tier = 1) {
     adapter.set_default_tier(tier);
     auto bytes = deterministic_bytes(file_size, seed);
-    co_await adapter.write(path, 0, asyncmux::span<const Byte>(bytes.data(), bytes.size()));
+    co_await adapter.write(path, 0, span<const std::byte>(bytes.data(), bytes.size()));
 }
 
 template <typename Fn>
@@ -411,7 +410,7 @@ task<BenchmarkResult> benchmark_sequential_write(AsyncMuxAdapter& adapter,
                 static_cast<std::uint64_t>((i * cfg.io_size_bytes) % cfg.file_size_bytes);
             co_await adapter.write(path,
                                    off,
-                                   asyncmux::span<const Byte>(payload.data(), payload.size()));
+                                   span<const std::byte>(payload.data(), payload.size()));
         });
 }
 
@@ -486,7 +485,7 @@ task<BenchmarkResult> benchmark_random_write(AsyncMuxAdapter& adapter,
 
             co_await adapter.write(path,
                                    off,
-                                   asyncmux::span<const Byte>(payload.data(), payload.size()));
+                                   span<const std::byte>(payload.data(), payload.size()));
         });
 }
 
@@ -513,7 +512,7 @@ task<BenchmarkResult> benchmark_mixed_rw(AsyncMuxAdapter& adapter,
                 adapter.set_default_tier((i % 2) ? 2 : 1);
                 co_await adapter.write(path,
                                        off,
-                                       asyncmux::span<const Byte>(payload.data(), payload.size()));
+                                       span<const std::byte>(payload.data(), payload.size()));
             } else {
                 auto out = co_await adapter.read(path, off, cfg.io_size_bytes);
                 if (cfg.verify && out.size() != cfg.io_size_bytes) {
@@ -600,7 +599,7 @@ task<BenchmarkResult> benchmark_background_migration(AsyncMuxAdapter& adapter,
                 adapter.set_default_tier((i % 2) ? 1 : 2);
                 co_await adapter.write(path,
                                        off,
-                                       asyncmux::span<const Byte>(payload.data(), payload.size()));
+                                       span<const std::byte>(payload.data(), payload.size()));
             }
         });
 }

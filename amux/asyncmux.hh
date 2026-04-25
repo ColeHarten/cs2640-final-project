@@ -21,26 +21,25 @@
 #include <unordered_set>
 #include <vector>
 
-#include "span.hh"
+#include "../span.hh"
 
-namespace asyncmux {
+namespace amux {
 
-using Byte = std::byte;
 using BlockId = std::uint64_t;
 using TierId = std::uint32_t;
 
 static constexpr std::size_t kBlockSize = 4096;
 
 struct IoBuffer {
-    std::vector<Byte> data;
+    std::vector<std::byte> data;
 
     IoBuffer();
     explicit IoBuffer(std::size_t n);
-    explicit IoBuffer(std::vector<Byte> bytes);
+    explicit IoBuffer(std::vector<std::byte> bytes);
 
     std::size_t size() const;
-    Byte* bytes();
-    const Byte* bytes() const;
+    std::byte* bytes();
+    const std::byte* bytes() const;
 };
 
 struct BlockLocation {
@@ -53,7 +52,7 @@ struct BlockLocation {
 struct WriteBlock {
     BlockId block_id;
     std::uint64_t file_offset;
-    std::vector<Byte> data;
+    std::vector<std::byte> data;
 };
 
 class IoError : public std::runtime_error {
@@ -92,7 +91,7 @@ public:
 
     virtual cppcoro::task<void> write_at(const std::string& relative_path,
                                          std::uint64_t offset,
-                                         asyncmux::span<const Byte> data) = 0;
+                                         span<const std::byte> data) = 0;
 
     virtual cppcoro::task<void> punch_hole(const std::string& relative_path,
                                            std::uint64_t offset,
@@ -127,7 +126,7 @@ public:
 
     cppcoro::task<void> write_at(const std::string& relative_path,
                                  std::uint64_t offset,
-                                 asyncmux::span<const Byte> data) override;
+                                 span<const std::byte> data) override;
 
     cppcoro::task<void> punch_hole(const std::string& relative_path,
                                    std::uint64_t offset,
@@ -237,7 +236,7 @@ public:
 
     cppcoro::task<void> write(const std::string& path,
                               std::uint64_t offset,
-                              asyncmux::span<const Byte> data);
+                              span<const std::byte> data);
 
     cppcoro::task<void> migrate(BlockId block_id, TierId src_id, TierId dst_id);
     cppcoro::task<void> promote(BlockId block_id, TierId hot_tier);
@@ -251,7 +250,7 @@ private:
     void enqueue_background_promotion(BlockId block_id);
     void background_worker_loop();
 
-    std::vector<WriteBlock> split(std::uint64_t offset, asyncmux::span<const Byte> data);
+    std::vector<WriteBlock> split(std::uint64_t offset, span<const std::byte> data);
 
     IoBuffer assemble(const std::vector<BlockLocation>& locations,
                       std::vector<IoBuffer> pieces,
@@ -284,7 +283,7 @@ public:
 
     cppcoro::task<void> on_write(const std::string& path,
                                  std::uint64_t offset,
-                                 asyncmux::span<const Byte> data);
+                                 span<const std::byte> data);
 
 private:
     AsyncMux& mux_;

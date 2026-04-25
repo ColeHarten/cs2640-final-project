@@ -17,7 +17,7 @@
 
 #include <cppcoro/sync_wait.hpp>
 
-namespace asyncmux {
+namespace amux {
 
 namespace {
 
@@ -70,11 +70,11 @@ std::string normalize_path(const std::string& path) {
 
 IoBuffer::IoBuffer() = default;
 IoBuffer::IoBuffer(std::size_t n) : data(n) {}
-IoBuffer::IoBuffer(std::vector<Byte> bytes) : data(std::move(bytes)) {}
+IoBuffer::IoBuffer(std::vector<std::byte> bytes) : data(std::move(bytes)) {}
 
 std::size_t IoBuffer::size() const { return data.size(); }
-Byte* IoBuffer::bytes() { return data.data(); }
-const Byte* IoBuffer::bytes() const { return data.data(); }
+std::byte* IoBuffer::bytes() { return data.data(); }
+const std::byte* IoBuffer::bytes() const { return data.data(); }
 
 void TierRegistry::add(std::unique_ptr<Tier> tier) {
     auto [it, inserted] = tiers_.emplace(tier->id(), std::move(tier));
@@ -159,7 +159,7 @@ cppcoro::task<IoBuffer> FileSystemTier::read_at(const std::string& relative_path
     const auto file_lock = lock_for_path(path);
     std::shared_lock<std::shared_mutex> lock(*file_lock);
 
-    std::vector<Byte> out(static_cast<std::size_t>(size), Byte{0});
+    std::vector<std::byte> out(static_cast<std::size_t>(size), std::byte{0});
 
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -199,7 +199,7 @@ cppcoro::task<IoBuffer> FileSystemTier::read_at(const std::string& relative_path
 
 cppcoro::task<void> FileSystemTier::write_at(const std::string& relative_path,
                                              std::uint64_t offset,
-                                             asyncmux::span<const Byte> data) {
+                                             span<const std::byte> data) {
     co_await pool_.schedule();
 
     const auto path = full_path(relative_path);
@@ -606,7 +606,7 @@ cppcoro::task<IoBuffer> AsyncMux::read(const std::string& raw_path,
 
 cppcoro::task<void> AsyncMux::write(const std::string& raw_path,
                                     std::uint64_t offset,
-                                    asyncmux::span<const Byte> data) {
+                                    span<const std::byte> data) {
     if (data.empty()) {
         co_return;
     }
@@ -630,7 +630,7 @@ cppcoro::task<void> AsyncMux::write(const std::string& raw_path,
         tasks.emplace_back(
             tier.write_at(path,
                           item.block.file_offset,
-                          asyncmux::span<const Byte>(item.block.data.data(),
+                          span<const std::byte>(item.block.data.data(),
                                                      item.block.data.size())));
     }
 
@@ -670,7 +670,7 @@ cppcoro::task<void> AsyncMux::migrate(BlockId block_id, TierId src_id, TierId ds
         auto data = co_await src_tier.read_at(located.path, old.file_offset, old.size);
         co_await dst_tier.write_at(located.path,
                                    old.file_offset,
-                                   asyncmux::span<const Byte>(data.data.data(),
+                                   span<const std::byte>(data.data.data(),
                                                               data.data.size()));
 
         if (metadata_.version_of(located.path) != start_version) {
@@ -701,7 +701,7 @@ cppcoro::task<void> AsyncMux::promote(BlockId block_id, TierId hot_tier) {
 }
 
 std::vector<WriteBlock> AsyncMux::split(std::uint64_t offset,
-                                        asyncmux::span<const Byte> data) {
+                                        span<const std::byte> data) {
     std::vector<WriteBlock> out;
     std::size_t cursor = 0;
 
@@ -711,7 +711,7 @@ std::vector<WriteBlock> AsyncMux::split(std::uint64_t offset,
         const std::size_t space_left = kBlockSize - in_block;
         const std::size_t n = std::min<std::size_t>(space_left, data.size() - cursor);
 
-        std::vector<Byte> chunk(n);
+        std::vector<std::byte> chunk(n);
         std::copy_n(data.begin() + static_cast<std::ptrdiff_t>(cursor), n, chunk.begin());
 
         out.push_back(WriteBlock{
@@ -763,7 +763,7 @@ cppcoro::task<IoBuffer> FuseFrontend::on_read(const std::string& path,
 
 cppcoro::task<void> FuseFrontend::on_write(const std::string& path,
                                            std::uint64_t offset,
-                                           asyncmux::span<const Byte> data) {
+                                           span<const std::byte> data) {
     co_await mux_.write(path, offset, data);
     co_return;
 }
