@@ -4,10 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="${ROOT_DIR}/data_analysis/raw"
 
-ASYNC_BIN="${ROOT_DIR}/../build/perf_async"
-BLOCK_BIN="${ROOT_DIR}/../build/perf_block"
+ASYNC_BIN="${ROOT_DIR}/../build/benchmark_async"
+BLOCK_BIN="${ROOT_DIR}/../build/benchmark_block"
 
-OPS=10000
+OPS=100
 THREADS=8
 CONCURRENCY=16
 SEED=1
