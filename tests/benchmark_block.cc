@@ -1,23 +1,25 @@
 #include <algorithm>
 #include <atomic>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -25,27 +27,17 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "amux/asyncmux.hh"
+#include "../bmux/blockmux.hh"
 #include "utils.hh"
 
-#include <cppcoro/static_thread_pool.hpp>
-#include <cppcoro/sync_wait.hpp>
-#include <cppcoro/task.hpp>
-#include <cppcoro/when_all.hpp>
-
-using amux::AsyncMux;
-using amux::BlockLocation;
-using amux::FileSystemTier;
-using amux::IoBuffer;
-using amux::MetadataStore;
-using amux::MutablePlacementPolicy;
-using amux::TierId;
-using amux::TierRegistry;
-using amux::kBlockSize;
-
-using cppcoro::static_thread_pool;
-using cppcoro::sync_wait;
-using cppcoro::task;
+using bmux::BlockingMux;
+using bmux::FileSystemTier;
+using bmux::IoBuffer;
+using bmux::MetadataStore;
+using bmux::MutablePlacementPolicy;
+using bmux::TierId;
+using bmux::TierRegistry;
+using bmux::kBlockSize;
 
 namespace fs = std::filesystem;
 
@@ -58,6 +50,45 @@ static_assert(
     false,
 #endif
     __FILE__ " requires Linux");
+
+constexpr size_t kConcurrencySweep[] = {1, 2, 4, 8, 16, 32, 64};
+
+enum class WorkloadKind {
+    all,
+    sequential_write,
+    sequential_read,
+    random_read,
+    random_write,
+    mixed_80r_20w,
+    fanout_read_multitier,
+    foreground_rw_multitier,
+};
+
+std::string to_string(WorkloadKind w) {
+    switch (w) {
+    case WorkloadKind::all: return "all";
+    case WorkloadKind::sequential_write: return "sequential_write";
+    case WorkloadKind::sequential_read: return "sequential_read";
+    case WorkloadKind::random_read: return "random_read";
+    case WorkloadKind::random_write: return "random_write";
+    case WorkloadKind::mixed_80r_20w: return "mixed_80r_20w";
+    case WorkloadKind::fanout_read_multitier: return "fanout_read_multitier";
+    case WorkloadKind::foreground_rw_multitier: return "foreground_rw_multitier";
+    }
+    throw std::runtime_error("unknown workload enum");
+}
+
+WorkloadKind parse_workload(const std::string& s) {
+    if (s == "all") return WorkloadKind::all;
+    if (s == "sequential_write") return WorkloadKind::sequential_write;
+    if (s == "sequential_read") return WorkloadKind::sequential_read;
+    if (s == "random_read") return WorkloadKind::random_read;
+    if (s == "random_write") return WorkloadKind::random_write;
+    if (s == "mixed_80r_20w") return WorkloadKind::mixed_80r_20w;
+    if (s == "fanout_read_multitier") return WorkloadKind::fanout_read_multitier;
+    if (s == "foreground_rw_multitier") return WorkloadKind::foreground_rw_multitier;
+    throw std::runtime_error("unknown workload: " + s);
+}
 
 void ensure_tier_ready(const fs::path& root, const std::string& name) {
     ensure_dir_exists(root);
@@ -112,12 +143,14 @@ void cleanup_prefix(const std::string& prefix) {
 struct BenchmarkConfig {
     std::size_t file_size_bytes = 64 * 1024 * 1024;
     std::size_t io_size_bytes = 4096;
-    std::size_t ops = 50000;
+    std::size_t ops = 10000;
     std::size_t concurrency = 16;
     std::size_t thread_pool_threads = 8;
     std::uint64_t seed = 1;
     bool csv = false;
     bool verify = false;
+    bool sweep_concurrency = false;
+    WorkloadKind workload = WorkloadKind::all;
 };
 
 struct BenchmarkResult {
@@ -192,6 +225,12 @@ BenchmarkResult summarize(const std::string& backend,
     return r;
 }
 
+void print_csv_header() {
+    std::cout
+        << "backend,workload,ops,total_bytes,concurrency,seconds,ops_per_sec,"
+        << "mib_per_sec,avg_us,p50_us,p95_us,p99_us,max_us\n";
+}
+
 void print_result(const BenchmarkResult& r, bool csv) {
     if (csv) {
         std::cout
@@ -230,16 +269,14 @@ void print_result(const BenchmarkResult& r, bool csv) {
 }
 
 struct Fixture {
-    static_thread_pool pool;
     TierRegistry tiers;
     MetadataStore metadata;
     MutablePlacementPolicy placement{1};
-    AsyncMux mux;
+    BlockingMux mux;
     std::string prefix;
 
     explicit Fixture(std::size_t pool_threads, std::string run_prefix)
-        : pool(pool_threads)
-        , mux(tiers, metadata, placement, pool, true, 1)
+        : mux(tiers, metadata, placement, pool_threads, true, 1)
         , prefix(std::move(run_prefix)) {
         wait_for_mount(kHotRoot, "hot");
         wait_for_mount(kWarmRoot, "warm");
@@ -265,9 +302,9 @@ struct Fixture {
 
         cleanup_prefix(prefix);
 
-        tiers.add(std::make_unique<FileSystemTier>(1, "hot", kHotRoot, pool));
-        tiers.add(std::make_unique<FileSystemTier>(2, "warm", kWarmRoot, pool));
-        tiers.add(std::make_unique<FileSystemTier>(3, "cold", kColdRoot, pool));
+        tiers.add(std::make_unique<FileSystemTier>(1, "hot", kHotRoot));
+        tiers.add(std::make_unique<FileSystemTier>(2, "warm", kWarmRoot));
+        tiers.add(std::make_unique<FileSystemTier>(3, "cold", kColdRoot));
     }
 
     ~Fixture() {
@@ -279,42 +316,35 @@ struct Fixture {
     }
 };
 
-struct AsyncMuxAdapter {
+struct BlockingMuxAdapter {
     Fixture& fx;
 
-    explicit AsyncMuxAdapter(Fixture& f) : fx(f) {}
+    explicit BlockingMuxAdapter(Fixture& f) : fx(f) {}
 
-    std::string name() const { return "asyncmux"; }
+    std::string name() const { return "blockingmux"; }
 
-    task<void> write(const std::string& path,
-                     std::uint64_t offset,
-                     span<const std::byte> bytes) {
-        co_await fx.mux.write(path, offset, bytes);
-    }
-
-    task<void> write_to_tier(const std::string& path,
-                             std::uint64_t offset,
-                             span<const std::byte> bytes,
-                             TierId tier) {
-        // Only use this in single-threaded setup code before concurrent workers start.
+    void set_default_tier(TierId tier) {
         fx.placement.set(tier);
-        co_await fx.mux.write(path, offset, bytes);
     }
 
-    task<IoBuffer> read(const std::string& path,
-                        std::uint64_t offset,
-                        std::uint64_t size) {
-        co_return co_await fx.mux.read(path, offset, size);
+    void write(const std::string& path,
+               std::uint64_t offset,
+               span<const std::byte> bytes) {
+        fx.mux.write(path, offset, bytes);
     }
 
-    task<void> migrate(std::uint64_t block_id, TierId src, TierId dst) {
-        co_await fx.mux.migrate(block_id, src, dst);
+    void write_to_tier(const std::string& path,
+                       std::uint64_t offset,
+                       span<const std::byte> bytes,
+                       TierId tier) {
+        fx.placement.set(tier);
+        fx.mux.write(path, offset, bytes);
     }
 
-    std::vector<BlockLocation> lookup(const std::string& path,
-                                      std::uint64_t offset,
-                                      std::uint64_t size) {
-        return sorted_locs(fx.metadata, path, offset, size);
+    IoBuffer read(const std::string& path,
+                  std::uint64_t offset,
+                  std::uint64_t size) {
+        return fx.mux.read(path, offset, size);
     }
 };
 
@@ -341,23 +371,23 @@ std::uint64_t random_aligned_offset(std::mt19937_64& rng,
     return static_cast<std::uint64_t>(slot * io_size);
 }
 
-task<void> prepopulate_file(AsyncMuxAdapter& adapter,
-                            const std::string& path,
-                            std::size_t file_size,
-                            std::uint64_t seed,
-                            TierId tier = 1) {
+void prepopulate_file(BlockingMuxAdapter& adapter,
+                      const std::string& path,
+                      std::size_t file_size,
+                      std::uint64_t seed,
+                      TierId tier = 1) {
     auto bytes = deterministic_bytes(file_size, seed);
-    co_await adapter.write_to_tier(
+    adapter.write_to_tier(
         path,
         0,
         span<const std::byte>(bytes.data(), bytes.size()),
         tier);
 }
 
-task<void> prepopulate_multitier_file(AsyncMuxAdapter& adapter,
-                                      const std::string& path,
-                                      std::size_t file_size,
-                                      std::uint64_t seed) {
+void prepopulate_multitier_file(BlockingMuxAdapter& adapter,
+                                const std::string& path,
+                                std::size_t file_size,
+                                std::uint64_t seed) {
     const std::size_t block_count = (file_size + kBlockSize - 1) / kBlockSize;
 
     for (std::size_t i = 0; i < block_count; ++i) {
@@ -366,7 +396,7 @@ task<void> prepopulate_multitier_file(AsyncMuxAdapter& adapter,
         const TierId tier = (i % 3 == 0) ? 1 : ((i % 3 == 1) ? 2 : 3);
         auto bytes = deterministic_bytes(this_block_size, seed + i);
 
-        co_await adapter.write_to_tier(
+        adapter.write_to_tier(
             path,
             static_cast<std::uint64_t>(i * kBlockSize),
             span<const std::byte>(bytes.data(), bytes.size()),
@@ -375,46 +405,64 @@ task<void> prepopulate_multitier_file(AsyncMuxAdapter& adapter,
 }
 
 template <typename Fn>
-task<BenchmarkResult> run_concurrent_workload(const std::string& backend_name,
-                                              const std::string& workload_name,
-                                              std::size_t concurrency,
-                                              std::size_t ops,
-                                              std::size_t bytes_per_op_estimate,
-                                              Fn make_one_op) {
+BenchmarkResult run_concurrent_workload(const std::string& backend_name,
+                                        const std::string& workload_name,
+                                        std::size_t concurrency,
+                                        std::size_t ops,
+                                        std::size_t bytes_per_op_estimate,
+                                        Fn make_one_op) {
     std::atomic<std::size_t> next_index{0};
     std::vector<std::uint64_t> latencies_ns(ops, 0);
 
-    auto worker = [&](std::size_t worker_id) -> task<void> {
-        while (true) {
-            const std::size_t i = next_index.fetch_add(1, std::memory_order_relaxed);
-            if (i >= ops) {
-                co_return;
+    std::mutex ex_mu;
+    std::exception_ptr ex;
+
+    auto worker = [&](std::size_t worker_id) {
+        try {
+            while (true) {
+                const std::size_t i = next_index.fetch_add(1, std::memory_order_relaxed);
+                if (i >= ops) {
+                    break;
+                }
+
+                const auto t0 = std::chrono::steady_clock::now();
+                make_one_op(worker_id, i);
+                const auto t1 = std::chrono::steady_clock::now();
+
+                latencies_ns[i] = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
             }
-
-            const auto t0 = std::chrono::steady_clock::now();
-            co_await make_one_op(worker_id, i);
-            const auto t1 = std::chrono::steady_clock::now();
-
-            latencies_ns[i] = static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        } catch (...) {
+            std::lock_guard<std::mutex> guard(ex_mu);
+            if (!ex) {
+                ex = std::current_exception();
+            }
         }
     };
 
     const auto start = std::chrono::steady_clock::now();
 
-    std::vector<task<void>> workers;
+    std::vector<std::thread> workers;
     workers.reserve(concurrency);
     for (std::size_t i = 0; i < concurrency; ++i) {
-        workers.emplace_back(worker(i));
+        workers.emplace_back(worker, i);
     }
 
-    co_await cppcoro::when_all(std::move(workers));
+    for (auto& w : workers) {
+        if (w.joinable()) {
+            w.join();
+        }
+    }
+
+    if (ex) {
+        std::rethrow_exception(ex);
+    }
 
     const auto end = std::chrono::steady_clock::now();
     const double seconds =
         std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
 
-    co_return summarize(
+    return summarize(
         backend_name,
         workload_name,
         concurrency,
@@ -423,46 +471,46 @@ task<BenchmarkResult> run_concurrent_workload(const std::string& backend_name,
         latencies_ns);
 }
 
-task<BenchmarkResult> benchmark_sequential_write(AsyncMuxAdapter& adapter,
-                                                 Fixture& fx,
-                                                 const BenchmarkConfig& cfg) {
+BenchmarkResult benchmark_sequential_write(BlockingMuxAdapter& adapter,
+                                           Fixture& fx,
+                                           const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("seq_write.dat");
     const auto payload = deterministic_bytes(cfg.io_size_bytes, cfg.seed + 100);
 
-    co_return co_await run_concurrent_workload(
+    return run_concurrent_workload(
         adapter.name(),
         "sequential_write",
         cfg.concurrency,
         cfg.ops,
         cfg.io_size_bytes,
-        [&](std::size_t, std::size_t i) -> task<void> {
+        [&](std::size_t, std::size_t i) {
             const std::uint64_t off =
                 static_cast<std::uint64_t>((i * cfg.io_size_bytes) % cfg.file_size_bytes);
 
-            co_await adapter.write(
+            adapter.write(
                 path,
                 off,
                 span<const std::byte>(payload.data(), payload.size()));
         });
 }
 
-task<BenchmarkResult> benchmark_sequential_read(AsyncMuxAdapter& adapter,
-                                                Fixture& fx,
-                                                const BenchmarkConfig& cfg) {
+BenchmarkResult benchmark_sequential_read(BlockingMuxAdapter& adapter,
+                                          Fixture& fx,
+                                          const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("seq_read.dat");
-    co_await prepopulate_file(adapter, path, cfg.file_size_bytes, cfg.seed + 200, 1);
+    prepopulate_file(adapter, path, cfg.file_size_bytes, cfg.seed + 200, 1);
 
-    co_return co_await run_concurrent_workload(
+    return run_concurrent_workload(
         adapter.name(),
         "sequential_read",
         cfg.concurrency,
         cfg.ops,
         cfg.io_size_bytes,
-        [&](std::size_t, std::size_t i) -> task<void> {
+        [&](std::size_t, std::size_t i) {
             const std::uint64_t off =
                 static_cast<std::uint64_t>((i * cfg.io_size_bytes) % cfg.file_size_bytes);
 
-            auto out = co_await adapter.read(path, off, cfg.io_size_bytes);
+            auto out = adapter.read(path, off, cfg.io_size_bytes);
 
             if (cfg.verify && out.size() != cfg.io_size_bytes) {
                 throw std::runtime_error("short read in sequential_read");
@@ -470,24 +518,24 @@ task<BenchmarkResult> benchmark_sequential_read(AsyncMuxAdapter& adapter,
         });
 }
 
-task<BenchmarkResult> benchmark_random_read(AsyncMuxAdapter& adapter,
-                                            Fixture& fx,
-                                            const BenchmarkConfig& cfg) {
+BenchmarkResult benchmark_random_read(BlockingMuxAdapter& adapter,
+                                      Fixture& fx,
+                                      const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("rand_read.dat");
-    co_await prepopulate_file(adapter, path, cfg.file_size_bytes, cfg.seed + 300, 1);
+    prepopulate_file(adapter, path, cfg.file_size_bytes, cfg.seed + 300, 1);
 
-    co_return co_await run_concurrent_workload(
+    return run_concurrent_workload(
         adapter.name(),
         "random_read",
         cfg.concurrency,
         cfg.ops,
         cfg.io_size_bytes,
-        [&](std::size_t worker_id, std::size_t i) -> task<void> {
+        [&](std::size_t worker_id, std::size_t i) {
             std::mt19937_64 rng(cfg.seed + 1000 + worker_id * 1315423911ULL + i);
             const std::uint64_t off =
                 random_aligned_offset(rng, cfg.file_size_bytes, cfg.io_size_bytes);
 
-            auto out = co_await adapter.read(path, off, cfg.io_size_bytes);
+            auto out = adapter.read(path, off, cfg.io_size_bytes);
 
             if (cfg.verify && out.size() != cfg.io_size_bytes) {
                 throw std::runtime_error("short read in random_read");
@@ -495,58 +543,58 @@ task<BenchmarkResult> benchmark_random_read(AsyncMuxAdapter& adapter,
         });
 }
 
-task<BenchmarkResult> benchmark_random_write(AsyncMuxAdapter& adapter,
-                                             Fixture& fx,
-                                             const BenchmarkConfig& cfg) {
+BenchmarkResult benchmark_random_write(BlockingMuxAdapter& adapter,
+                                       Fixture& fx,
+                                       const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("rand_write.dat");
     const auto payload = deterministic_bytes(cfg.io_size_bytes, cfg.seed + 400);
 
-    co_await prepopulate_file(adapter, path, cfg.file_size_bytes, cfg.seed + 401, 1);
+    prepopulate_file(adapter, path, cfg.file_size_bytes, cfg.seed + 401, 1);
 
-    co_return co_await run_concurrent_workload(
+    return run_concurrent_workload(
         adapter.name(),
         "random_write",
         cfg.concurrency,
         cfg.ops,
         cfg.io_size_bytes,
-        [&](std::size_t worker_id, std::size_t i) -> task<void> {
+        [&](std::size_t worker_id, std::size_t i) {
             std::mt19937_64 rng(cfg.seed + 2000 + worker_id * 11400714819323198485ULL + i);
             const std::uint64_t off =
                 random_aligned_offset(rng, cfg.file_size_bytes, cfg.io_size_bytes);
 
-            co_await adapter.write(
+            adapter.write(
                 path,
                 off,
                 span<const std::byte>(payload.data(), payload.size()));
         });
 }
 
-task<BenchmarkResult> benchmark_mixed_rw(AsyncMuxAdapter& adapter,
-                                         Fixture& fx,
-                                         const BenchmarkConfig& cfg) {
+BenchmarkResult benchmark_mixed_rw(BlockingMuxAdapter& adapter,
+                                   Fixture& fx,
+                                   const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("mixed_rw.dat");
     const auto payload = deterministic_bytes(cfg.io_size_bytes, cfg.seed + 500);
 
-    co_await prepopulate_file(adapter, path, cfg.file_size_bytes, cfg.seed + 501, 1);
+    prepopulate_file(adapter, path, cfg.file_size_bytes, cfg.seed + 501, 1);
 
-    co_return co_await run_concurrent_workload(
+    return run_concurrent_workload(
         adapter.name(),
         "mixed_80r_20w",
         cfg.concurrency,
         cfg.ops,
         cfg.io_size_bytes,
-        [&](std::size_t worker_id, std::size_t i) -> task<void> {
+        [&](std::size_t worker_id, std::size_t i) {
             std::mt19937_64 rng(cfg.seed + 3000 + worker_id * 6364136223846793005ULL + i);
             const std::uint64_t off =
                 random_aligned_offset(rng, cfg.file_size_bytes, cfg.io_size_bytes);
 
             if ((i % 5) == 0) {
-                co_await adapter.write(
+                adapter.write(
                     path,
                     off,
                     span<const std::byte>(payload.data(), payload.size()));
             } else {
-                auto out = co_await adapter.read(path, off, cfg.io_size_bytes);
+                auto out = adapter.read(path, off, cfg.io_size_bytes);
 
                 if (cfg.verify && out.size() != cfg.io_size_bytes) {
                     throw std::runtime_error("short read in mixed_80r_20w");
@@ -555,26 +603,26 @@ task<BenchmarkResult> benchmark_mixed_rw(AsyncMuxAdapter& adapter,
         });
 }
 
-task<BenchmarkResult> benchmark_fanout_read(AsyncMuxAdapter& adapter,
-                                            Fixture& fx,
-                                            const BenchmarkConfig& cfg) {
+BenchmarkResult benchmark_fanout_read(BlockingMuxAdapter& adapter,
+                                      Fixture& fx,
+                                      const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("fanout_read.dat");
     const std::size_t size = std::max<std::size_t>(8 * 1024 * 1024, 8 * kBlockSize);
     const std::size_t read_size = std::min<std::size_t>(cfg.io_size_bytes, 16 * 1024);
 
-    co_await prepopulate_multitier_file(adapter, path, size, cfg.seed + 600);
+    prepopulate_multitier_file(adapter, path, size, cfg.seed + 600);
 
-    co_return co_await run_concurrent_workload(
+    return run_concurrent_workload(
         adapter.name(),
         "fanout_read_multitier",
         cfg.concurrency,
         cfg.ops,
         read_size,
-        [&](std::size_t worker_id, std::size_t i) -> task<void> {
+        [&](std::size_t worker_id, std::size_t i) {
             std::mt19937_64 rng(cfg.seed + 4000 + worker_id * 911382323ULL + i);
             const std::uint64_t off = random_aligned_offset(rng, size, read_size);
 
-            auto out = co_await adapter.read(path, off, read_size);
+            auto out = adapter.read(path, off, read_size);
 
             if (cfg.verify && out.size() != read_size) {
                 throw std::runtime_error("short read in fanout_read_multitier");
@@ -582,27 +630,27 @@ task<BenchmarkResult> benchmark_fanout_read(AsyncMuxAdapter& adapter,
         });
 }
 
-task<BenchmarkResult> benchmark_foreground_rw_on_multitier(AsyncMuxAdapter& adapter,
-                                                           Fixture& fx,
-                                                           const BenchmarkConfig& cfg) {
+BenchmarkResult benchmark_foreground_rw_multitier(BlockingMuxAdapter& adapter,
+                                                  Fixture& fx,
+                                                  const BenchmarkConfig& cfg) {
     const std::string path = fx.full_path("multitier_rw.dat");
     const std::size_t size = std::max<std::size_t>(8 * 1024 * 1024, 16 * kBlockSize);
 
-    co_await prepopulate_multitier_file(adapter, path, size, cfg.seed + 700);
+    prepopulate_multitier_file(adapter, path, size, cfg.seed + 700);
 
-    co_return co_await run_concurrent_workload(
+    return run_concurrent_workload(
         adapter.name(),
         "foreground_rw_multitier",
         cfg.concurrency,
         cfg.ops,
         cfg.io_size_bytes,
-        [&](std::size_t worker_id, std::size_t i) -> task<void> {
+        [&](std::size_t worker_id, std::size_t i) {
             std::mt19937_64 rng(cfg.seed + 5000 + worker_id * 1442695040888963407ULL + i);
             const std::uint64_t off =
                 random_aligned_offset(rng, size, cfg.io_size_bytes);
 
             if ((i % 10) < 8) {
-                auto out = co_await adapter.read(path, off, cfg.io_size_bytes);
+                auto out = adapter.read(path, off, cfg.io_size_bytes);
 
                 if (cfg.verify && out.size() != cfg.io_size_bytes) {
                     throw std::runtime_error("short read in foreground_rw_multitier");
@@ -610,7 +658,7 @@ task<BenchmarkResult> benchmark_foreground_rw_on_multitier(AsyncMuxAdapter& adap
             } else {
                 auto payload = deterministic_bytes(cfg.io_size_bytes, cfg.seed + 9000 + i);
 
-                co_await adapter.write(
+                adapter.write(
                     path,
                     off,
                     span<const std::byte>(payload.data(), payload.size()));
@@ -618,20 +666,62 @@ task<BenchmarkResult> benchmark_foreground_rw_on_multitier(AsyncMuxAdapter& adap
         });
 }
 
-task<void> run_suite(AsyncMuxAdapter& adapter, Fixture& fx, const BenchmarkConfig& cfg) {
+BenchmarkResult run_one_workload(BlockingMuxAdapter& adapter,
+                                 Fixture& fx,
+                                 const BenchmarkConfig& cfg,
+                                 WorkloadKind workload) {
+    switch (workload) {
+    case WorkloadKind::sequential_write:
+        return benchmark_sequential_write(adapter, fx, cfg);
+    case WorkloadKind::sequential_read:
+        return benchmark_sequential_read(adapter, fx, cfg);
+    case WorkloadKind::random_read:
+        return benchmark_random_read(adapter, fx, cfg);
+    case WorkloadKind::random_write:
+        return benchmark_random_write(adapter, fx, cfg);
+    case WorkloadKind::mixed_80r_20w:
+        return benchmark_mixed_rw(adapter, fx, cfg);
+    case WorkloadKind::fanout_read_multitier:
+        return benchmark_fanout_read(adapter, fx, cfg);
+    case WorkloadKind::foreground_rw_multitier:
+        return benchmark_foreground_rw_multitier(adapter, fx, cfg);
+    case WorkloadKind::all:
+        throw std::runtime_error("run_one_workload called with all");
+    }
+    throw std::runtime_error("unreachable");
+}
+
+void run_summary(BlockingMuxAdapter& adapter, Fixture& fx, const BenchmarkConfig& cfg) {
     if (cfg.csv) {
-        std::cout
-            << "backend,workload,ops,total_bytes,concurrency,seconds,ops_per_sec,"
-            << "mib_per_sec,avg_us,p50_us,p95_us,p99_us,max_us\n";
+        print_csv_header();
     }
 
-    print_result(co_await benchmark_sequential_write(adapter, fx, cfg), cfg.csv);
-    print_result(co_await benchmark_sequential_read(adapter, fx, cfg), cfg.csv);
-    print_result(co_await benchmark_random_read(adapter, fx, cfg), cfg.csv);
-    print_result(co_await benchmark_random_write(adapter, fx, cfg), cfg.csv);
-    print_result(co_await benchmark_mixed_rw(adapter, fx, cfg), cfg.csv);
-    print_result(co_await benchmark_fanout_read(adapter, fx, cfg), cfg.csv);
-    print_result(co_await benchmark_foreground_rw_on_multitier(adapter, fx, cfg), cfg.csv);
+    if (cfg.workload == WorkloadKind::all) {
+        print_result(benchmark_sequential_write(adapter, fx, cfg), cfg.csv);
+        print_result(benchmark_sequential_read(adapter, fx, cfg), cfg.csv);
+        print_result(benchmark_random_read(adapter, fx, cfg), cfg.csv);
+        print_result(benchmark_random_write(adapter, fx, cfg), cfg.csv);
+        print_result(benchmark_mixed_rw(adapter, fx, cfg), cfg.csv);
+        print_result(benchmark_fanout_read(adapter, fx, cfg), cfg.csv);
+        print_result(benchmark_foreground_rw_multitier(adapter, fx, cfg), cfg.csv);
+    } else {
+        print_result(run_one_workload(adapter, fx, cfg, cfg.workload), cfg.csv);
+    }
+}
+
+void run_concurrency_sweep(BlockingMuxAdapter& adapter, Fixture& fx, BenchmarkConfig cfg) {
+    if (cfg.workload == WorkloadKind::all) {
+        throw std::runtime_error("--sweep-concurrency requires --workload");
+    }
+
+    if (cfg.csv) {
+        print_csv_header();
+    }
+
+    for (std::size_t conc : kConcurrencySweep) {
+        cfg.concurrency = conc;
+        print_result(run_one_workload(adapter, fx, cfg, cfg.workload), cfg.csv);
+    }
 }
 
 BenchmarkConfig parse_args(int argc, char** argv) {
@@ -664,10 +754,14 @@ BenchmarkConfig parse_args(int argc, char** argv) {
                 static_cast<std::size_t>(std::stoull(need_value("--threads")));
         } else if (arg == "--seed") {
             cfg.seed = static_cast<std::uint64_t>(std::stoull(need_value("--seed")));
+        } else if (arg == "--workload") {
+            cfg.workload = parse_workload(need_value("--workload"));
         } else if (arg == "--csv") {
             cfg.csv = true;
         } else if (arg == "--verify") {
             cfg.verify = true;
+        } else if (arg == "--sweep-concurrency") {
+            cfg.sweep_concurrency = true;
         } else {
             throw std::runtime_error("unknown argument: " + arg);
         }
@@ -699,13 +793,18 @@ int main(int argc, char** argv) {
         const auto cfg = parse_args(argc, argv);
 
         const std::string run_prefix =
-            "perf_" + std::to_string(::getpid()) + "_" +
+            "perf_blocking_" + std::to_string(::getpid()) + "_" +
             std::to_string(static_cast<unsigned long long>(cfg.seed));
 
         Fixture fx(cfg.thread_pool_threads, run_prefix);
-        AsyncMuxAdapter adapter{fx};
+        BlockingMuxAdapter adapter{fx};
 
-        sync_wait(run_suite(adapter, fx, cfg));
+        if (cfg.sweep_concurrency) {
+            run_concurrency_sweep(adapter, fx, cfg);
+        } else {
+            run_summary(adapter, fx, cfg);
+        }
+
         return 0;
     } catch (const std::exception& ex) {
         log_uncaught_exception(ex, __FILE__, __LINE__, __func__);
