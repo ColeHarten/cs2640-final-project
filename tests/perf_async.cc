@@ -25,7 +25,6 @@
 #include <vector>
 
 #include <sys/stat.h>
-#include <sys/statfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -51,8 +50,6 @@ using cppcoro::static_thread_pool;
 using cppcoro::sync_wait;
 using cppcoro::task;
 
-namespace fs = std::filesystem;
-
 namespace {
 
 static_assert(
@@ -62,73 +59,6 @@ static_assert(
     false,
 #endif
     "perf_async.cc requires Linux");
-
-const fs::path kHotRoot  = "/tier0/tmpfs";
-const fs::path kWarmRoot = "/tier1/data";
-const fs::path kColdRoot = "/tier2/data";
-
-constexpr long kTmpfsMagic = 0x01021994;
-constexpr long kExtMagic   = 0xEF53;
-constexpr long kXfsMagic   = 0x58465342;
-
-// ------------------------------------------------------------
-// Environment setup helpers 
-// ------------------------------------------------------------
-
-long fs_magic_for(const fs::path& root) {
-    struct statfs stat_info {};
-    if (statfs(root.c_str(), &stat_info) != 0) {
-        throw std::runtime_error("statfs failed for " + root.string());
-    }
-    return static_cast<long>(stat_info.f_type);
-}
-
-bool is_mountpoint(const fs::path& root) {
-    std::error_code ec;
-    if (!fs::exists(root, ec) || ec) {
-        return false;
-    }
-
-    struct stat root_stat {};
-    struct stat parent_stat {};
-
-    if (::stat(root.c_str(), &root_stat) != 0) {
-        return false;
-    }
-
-    const fs::path parent = root.parent_path();
-    if (parent.empty()) {
-        return true;
-    }
-
-    if (::stat(parent.c_str(), &parent_stat) != 0) {
-        return false;
-    }
-
-    return (root_stat.st_dev != parent_stat.st_dev) ||
-           (root_stat.st_ino == parent_stat.st_ino);
-}
-
-void ensure_dir_exists(const fs::path& root) {
-    std::error_code ec;
-    if (!fs::exists(root, ec) || ec) {
-        throw std::runtime_error("expected tier path does not exist: " + root.string());
-    }
-    if (!fs::is_directory(root, ec) || ec) {
-        throw std::runtime_error("expected tier path is not a directory: " + root.string());
-    }
-}
-
-void wait_for_mount(const fs::path& root, const std::string& name) {
-    for (int i = 0; i < 30; ++i) {
-        std::error_code ec;
-        if (fs::exists(root, ec) && !ec && is_mountpoint(root)) {
-            return;
-        }
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
-    throw std::runtime_error("timed out waiting for " + name + " tier mount: " + root.string());
-}
 
 void ensure_tier_ready(const fs::path& root, const std::string& name) {
     ensure_dir_exists(root);
@@ -179,22 +109,6 @@ void cleanup_prefix(const std::string& prefix) {
     fs::remove_all(kWarmRoot / prefix, ec);
     fs::remove_all(kColdRoot / prefix, ec);
 }
-
-std::vector<BlockLocation> sorted_locs(MetadataStore& metadata,
-                                       const std::string& path,
-                                       std::uint64_t offset,
-                                       std::uint64_t size) {
-    auto locs = metadata.lookup(path, offset, size);
-    std::sort(locs.begin(), locs.end(),
-              [](const BlockLocation& a, const BlockLocation& b) {
-                  return a.file_offset < b.file_offset;
-              });
-    return locs;
-}
-
-// ------------------------------------------------------------
-// Benchmark config
-// ------------------------------------------------------------
 
 struct BenchmarkConfig {
     std::size_t file_size_bytes = 64 * 1024 * 1024;
@@ -306,10 +220,6 @@ void print_result(const BenchmarkResult& r, bool csv) {
     std::cout.unsetf(std::ios::floatfield);
 }
 
-// ------------------------------------------------------------
-// Generic benchmark fixture
-// ------------------------------------------------------------
-
 struct Fixture {
     static_thread_pool pool;
     TierRegistry tiers;
@@ -320,7 +230,7 @@ struct Fixture {
 
     explicit Fixture(std::size_t pool_threads, std::string run_prefix)
         : pool(pool_threads)
-        , mux(tiers, metadata, placement, pool, false)
+        , mux(tiers, metadata, placement, pool, true, 1)
         , prefix(std::move(run_prefix)) {
         wait_for_mount(kHotRoot, "hot");
         wait_for_mount(kWarmRoot, "warm");
@@ -360,10 +270,6 @@ struct Fixture {
     }
 };
 
-// ------------------------------------------------------------
-// Async benchmark adapter
-// ------------------------------------------------------------
-
 struct AsyncMuxAdapter {
     Fixture& fx;
 
@@ -399,10 +305,6 @@ struct AsyncMuxAdapter {
         return sorted_locs(fx.metadata, path, offset, size);
     }
 };
-
-// ------------------------------------------------------------
-// Utilities
-// ------------------------------------------------------------
 
 std::vector<Byte> deterministic_bytes(std::size_t n, std::uint64_t seed) {
     std::vector<Byte> out(n);
@@ -488,10 +390,6 @@ task<BenchmarkResult> run_concurrent_workload(
                         seconds,
                         latencies_ns);
 }
-
-// ------------------------------------------------------------
-// Workloads
-// ------------------------------------------------------------
 
 task<BenchmarkResult> benchmark_sequential_write(AsyncMuxAdapter& adapter,
                                                  Fixture& fx,
@@ -675,32 +573,15 @@ task<BenchmarkResult> benchmark_background_migration(AsyncMuxAdapter& adapter,
         throw std::runtime_error("background migration benchmark requires populated metadata");
     }
 
-    std::atomic<bool> stop{false};
-    std::atomic<std::size_t> migrate_cursor{0};
+    for (std::size_t i = 0; i < locs.size(); ++i) {
+        const TierId dst = (i % 2 == 0) ? 2 : 3;
+        co_await adapter.migrate(locs[i].block_id, 1, dst);
+    }
 
-    auto migrator = [&]() -> task<void> {
-        co_await fx.pool.schedule();
-
-        while (!stop.load(std::memory_order_relaxed)) {
-            const std::size_t idx = migrate_cursor.fetch_add(1, std::memory_order_relaxed) % locs.size();
-            auto& loc = locs[idx];
-
-            const TierId src = loc.tier_id;
-            const TierId dst =
-                (src == 1) ? 2 :
-                (src == 2) ? 3 : 1;
-
-            co_await adapter.migrate(loc.block_id, src, dst);
-            loc.tier_id = dst;
-        }
-    };
-
-    auto bg = migrator();
-
-    auto result = co_await run_concurrent_workload(
+    co_return co_await run_concurrent_workload(
         fx.pool,
         adapter.name(),
-        "foreground_rw_with_bg_migration",
+        "foreground_rw_with_bg_promotion",
         cfg.concurrency,
         cfg.ops,
         cfg.io_size_bytes,
@@ -712,7 +593,7 @@ task<BenchmarkResult> benchmark_background_migration(AsyncMuxAdapter& adapter,
             if ((i % 10) < 8) {
                 auto out = co_await adapter.read(path, off, cfg.io_size_bytes);
                 if (cfg.verify && out.size() != cfg.io_size_bytes) {
-                    throw std::runtime_error("short read in bg migration workload");
+                    throw std::runtime_error("short read in bg promotion workload");
                 }
             } else {
                 auto payload = deterministic_bytes(cfg.io_size_bytes, cfg.seed + 9000 + i);
@@ -722,16 +603,7 @@ task<BenchmarkResult> benchmark_background_migration(AsyncMuxAdapter& adapter,
                                        asyncmux::span<const Byte>(payload.data(), payload.size()));
             }
         });
-
-    stop.store(true, std::memory_order_relaxed);
-    co_await bg;
-
-    co_return result;
 }
-
-// ------------------------------------------------------------
-// Runner
-// ------------------------------------------------------------
 
 task<void> run_suite(AsyncMuxAdapter& adapter, Fixture& fx, const BenchmarkConfig& cfg) {
     if (cfg.csv) {

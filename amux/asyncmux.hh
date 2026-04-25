@@ -2,25 +2,23 @@
 #define ASYNC_MUX_HH
 
 #include <cppcoro/static_thread_pool.hpp>
-#include <cppcoro/async_scope.hpp>
-#include <cppcoro/single_consumer_async_auto_reset_event.hpp>
 #include <cppcoro/task.hpp>
 #include <cppcoro/when_all.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <queue>
 #include <shared_mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
-#include <stdexcept>
-#include <span>
-#include <string>
 #include <vector>
 
 #include "span.hh"
@@ -28,21 +26,19 @@
 namespace asyncmux {
 
 using Byte = std::byte;
-using size_t = std::size_t;
-using uint64_t = std::uint64_t;
-using BlockId = uint64_t;
+using BlockId = std::uint64_t;
 using TierId = std::uint32_t;
 
-static constexpr size_t kBlockSize = 4096;
+static constexpr std::size_t kBlockSize = 4096;
 
 struct IoBuffer {
     std::vector<Byte> data;
 
     IoBuffer();
-    explicit IoBuffer(size_t n);
+    explicit IoBuffer(std::size_t n);
     explicit IoBuffer(std::vector<Byte> bytes);
 
-    size_t size() const;
+    std::size_t size() const;
     Byte* bytes();
     const Byte* bytes() const;
 };
@@ -50,13 +46,13 @@ struct IoBuffer {
 struct BlockLocation {
     BlockId block_id;
     TierId tier_id;
-    uint64_t file_offset;
-    uint64_t size;
+    std::uint64_t file_offset;
+    std::uint64_t size;
 };
 
 struct WriteBlock {
     BlockId block_id;
-    uint64_t file_offset;
+    std::uint64_t file_offset;
     std::vector<Byte> data;
 };
 
@@ -82,7 +78,6 @@ private:
 
 class MetadataStore;
 class PlacementPolicy;
-class TierRegistry;
 
 class Tier {
 public:
@@ -92,16 +87,16 @@ public:
     virtual std::string name() const = 0;
 
     virtual cppcoro::task<IoBuffer> read_at(const std::string& relative_path,
-                                            uint64_t offset,
-                                            uint64_t size) = 0;
+                                            std::uint64_t offset,
+                                            std::uint64_t size) = 0;
 
     virtual cppcoro::task<void> write_at(const std::string& relative_path,
-                                         uint64_t offset,
+                                         std::uint64_t offset,
                                          asyncmux::span<const Byte> data) = 0;
 
     virtual cppcoro::task<void> punch_hole(const std::string& relative_path,
-                                           uint64_t offset,
-                                           uint64_t size) = 0;
+                                           std::uint64_t offset,
+                                           std::uint64_t size) = 0;
 
     virtual cppcoro::task<void> remove_file(const std::string& relative_path) = 0;
 };
@@ -127,16 +122,16 @@ public:
     std::string name() const override;
 
     cppcoro::task<IoBuffer> read_at(const std::string& relative_path,
-                                    uint64_t offset,
-                                    uint64_t size) override;
+                                    std::uint64_t offset,
+                                    std::uint64_t size) override;
 
     cppcoro::task<void> write_at(const std::string& relative_path,
-                                 uint64_t offset,
+                                 std::uint64_t offset,
                                  asyncmux::span<const Byte> data) override;
 
     cppcoro::task<void> punch_hole(const std::string& relative_path,
-                                   uint64_t offset,
-                                   uint64_t size) override;
+                                   std::uint64_t offset,
+                                   std::uint64_t size) override;
 
     cppcoro::task<void> remove_file(const std::string& relative_path) override;
 
@@ -153,107 +148,36 @@ private:
     mutable std::unordered_map<std::string, std::shared_ptr<std::shared_mutex>> file_locks_;
 };
 
-class AsyncMux {
-public:
-    AsyncMux(TierRegistry& tiers,
-             MetadataStore& metadata,
-             PlacementPolicy& placement,
-             cppcoro::static_thread_pool& pool,
-             bool auto_migration_enabled = true,
-             TierId hot_tier_id = 0);
-
-    ~AsyncMux();
-
-    cppcoro::task<IoBuffer> read(const std::string& path,
-                                 uint64_t offset,
-                                 uint64_t size);
-
-    cppcoro::task<void> write(const std::string& path,
-                              uint64_t offset,
-                              asyncmux::span<const Byte> data);
-
-    cppcoro::task<void> migrate(BlockId block_id, TierId src_id, TierId dst_id);
-
-    cppcoro::task<void> promote(BlockId block_id, TierId hot_tier);
-
-private:
-    class PromotionQueue {
-    public:
-        bool push(BlockId block_id);
-        void stop() noexcept;
-        cppcoro::task<std::optional<BlockId>> pop();
-
-    private:
-        std::mutex mu_;
-        std::queue<BlockId> queue_;
-        cppcoro::single_consumer_async_auto_reset_event has_item_{false};
-        bool stopping_ = false;
-    };
-
-    struct PreparedWrite {
-        WriteBlock block;
-        TierId tier_id;
-    };
-
-    std::vector<WriteBlock> split(uint64_t offset, asyncmux::span<const Byte> data);
-
-    IoBuffer assemble(const std::vector<BlockLocation>& locations,
-                      std::vector<IoBuffer> pieces,
-                      uint64_t read_offset,
-                      uint64_t read_size);
-
-    bool mark_promotion_queued(BlockId block_id);
-    void clear_promotion_queued(BlockId block_id);
-
-    void enqueue_background_promotion(BlockId block_id);
-    cppcoro::task<void> background_loop();
-
-    TierRegistry& tiers_;
-    MetadataStore& metadata_;
-    PlacementPolicy& placement_;
-    cppcoro::static_thread_pool& pool_;
-    cppcoro::async_scope bg_scope_;
-    BlockAllocator allocator_;
-    bool auto_migration_enabled_;
-    TierId hot_tier_id_;
-
-    PromotionQueue promotion_queue_;
-    std::mutex promotion_dedup_mu_;
-    std::unordered_set<BlockId> queued_or_inflight_;
-    std::atomic<bool> stopping_{false};
-};
-
 class MetadataStore {
 public:
     std::vector<BlockLocation> lookup(const std::string& path,
-                                      uint64_t offset,
-                                      uint64_t size) const;
+                                      std::uint64_t offset,
+                                      std::uint64_t size) const;
 
     void update(const std::string& path,
                 BlockId block_id,
                 TierId tier_id,
-                uint64_t file_offset,
-                uint64_t size);
+                std::uint64_t file_offset,
+                std::uint64_t size);
 
     void relocate_block(BlockId block_id, TierId new_tier);
 
     LocatedBlock get_block(BlockId block_id) const;
-
     TierId tier_of(BlockId block_id) const;
 
-    uint64_t version_of(const std::string& path) const;
-    uint64_t bump_version(const std::string& path);
+    std::uint64_t version_of(const std::string& path) const;
+    std::uint64_t bump_version(const std::string& path);
 
 private:
     struct FileEntry {
         std::vector<BlockLocation> extents;
-        uint64_t version = 0;
+        std::uint64_t version = 0;
     };
 
     struct BlockIndexEntry {
         std::string path;
-        uint64_t file_offset = 0;
-        uint64_t size = 0;
+        std::uint64_t file_offset = 0;
+        std::uint64_t size = 0;
     };
 
     void rebuild_block_index_locked(const std::string& path);
@@ -281,7 +205,8 @@ private:
 
 class MutablePlacementPolicy final : public PlacementPolicy {
 public:
-    explicit MutablePlacementPolicy(TierId initial_tier) : tier_(initial_tier) {}
+    explicit MutablePlacementPolicy(TierId initial_tier)
+        : tier_(initial_tier) {}
 
     void set(TierId tier) {
         tier_ = tier;
@@ -292,7 +217,61 @@ public:
     }
 
 private:
-    std::atomic<TierId> tier_;
+    TierId tier_;
+};
+
+class AsyncMux {
+public:
+    AsyncMux(TierRegistry& tiers,
+             MetadataStore& metadata,
+             PlacementPolicy& placement,
+             cppcoro::static_thread_pool& pool,
+             bool auto_migration_enabled = false,
+             TierId hot_tier_id = 0);
+
+    ~AsyncMux();
+
+    cppcoro::task<IoBuffer> read(const std::string& path,
+                                 std::uint64_t offset,
+                                 std::uint64_t size);
+
+    cppcoro::task<void> write(const std::string& path,
+                              std::uint64_t offset,
+                              asyncmux::span<const Byte> data);
+
+    cppcoro::task<void> migrate(BlockId block_id, TierId src_id, TierId dst_id);
+    cppcoro::task<void> promote(BlockId block_id, TierId hot_tier);
+
+private:
+    struct PreparedWrite {
+        WriteBlock block;
+        TierId tier_id;
+    };
+
+    void enqueue_background_promotion(BlockId block_id);
+    void background_worker_loop();
+
+    std::vector<WriteBlock> split(std::uint64_t offset, asyncmux::span<const Byte> data);
+
+    IoBuffer assemble(const std::vector<BlockLocation>& locations,
+                      std::vector<IoBuffer> pieces,
+                      std::uint64_t read_offset,
+                      std::uint64_t read_size);
+
+    TierRegistry& tiers_;
+    MetadataStore& metadata_;
+    PlacementPolicy& placement_;
+    cppcoro::static_thread_pool& pool_;
+    BlockAllocator allocator_;
+    bool auto_migration_enabled_ = false;
+    TierId hot_tier_id_ = 0;
+
+    std::thread bg_thread_;
+    std::mutex bg_mu_;
+    std::condition_variable bg_cv_;
+    bool bg_stop_ = false;
+    std::queue<BlockId> bg_queue_;
+    std::unordered_set<BlockId> bg_queued_;
 };
 
 class FuseFrontend {
@@ -300,17 +279,17 @@ public:
     explicit FuseFrontend(AsyncMux& mux);
 
     cppcoro::task<IoBuffer> on_read(const std::string& path,
-                                    uint64_t offset,
-                                    uint64_t size);
+                                    std::uint64_t offset,
+                                    std::uint64_t size);
 
     cppcoro::task<void> on_write(const std::string& path,
-                                 uint64_t offset,
+                                 std::uint64_t offset,
                                  asyncmux::span<const Byte> data);
 
 private:
     AsyncMux& mux_;
 };
 
-} // namespace asyncmux
+}  // namespace asyncmux
 
 #endif

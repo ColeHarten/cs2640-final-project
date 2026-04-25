@@ -1,12 +1,22 @@
 #ifndef ASYNCMUX_TEST_UTILS_HH
 #define ASYNCMUX_TEST_UTILS_HH
 
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <exception>
 #include <iostream>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <sys/stat.h>
+#include <sys/statfs.h>
+#include <unistd.h>
 
 #ifdef __linux__
 #include <execinfo.h>
@@ -14,8 +24,20 @@
 
 #include "amux/asyncmux.hh"
 
+using asyncmux::BlockLocation;
 using asyncmux::Byte;
 using asyncmux::IoBuffer;
+using asyncmux::MetadataStore;
+
+namespace fs = std::filesystem;
+
+inline const fs::path kHotRoot = "/tier0/tmpfs";
+inline const fs::path kWarmRoot = "/tier1/data";
+inline const fs::path kColdRoot = "/tier2/data";
+
+inline constexpr long kTmpfsMagic = 0x01021994;
+inline constexpr long kExtMagic = 0xEF53;
+inline constexpr long kXfsMagic = 0x58465342;
 
 inline constexpr const char* kColorRed = "\x1b[31m";
 inline constexpr const char* kColorBoldGreen = "\x1b[1;32m";
@@ -29,6 +51,82 @@ inline std::vector<Byte> to_bytes(const std::string& s) {
         out.push_back(static_cast<Byte>(ch));
     }
     return out;
+}
+
+inline long fs_magic_for(const fs::path& root) {
+    struct statfs stat_info {};
+    if (statfs(root.c_str(), &stat_info) != 0) {
+        throw std::runtime_error("statfs failed for " + root.string());
+    }
+    return static_cast<long>(stat_info.f_type);
+}
+
+inline bool is_mountpoint(const fs::path& root) {
+    std::error_code ec;
+    if (!fs::exists(root, ec) || ec) {
+        return false;
+    }
+
+    struct stat root_stat {};
+    struct stat parent_stat {};
+
+    if (::stat(root.c_str(), &root_stat) != 0) {
+        return false;
+    }
+
+    const fs::path parent = root.parent_path();
+    if (parent.empty()) {
+        return true;
+    }
+
+    if (::stat(parent.c_str(), &parent_stat) != 0) {
+        return false;
+    }
+
+    return (root_stat.st_dev != parent_stat.st_dev) ||
+           (root_stat.st_ino == parent_stat.st_ino);
+}
+
+inline void ensure_dir_exists(const fs::path& root) {
+    std::error_code ec;
+    if (!fs::exists(root, ec) || ec) {
+        throw std::runtime_error("expected tier path does not exist: " + root.string());
+    }
+    if (!fs::is_directory(root, ec) || ec) {
+        throw std::runtime_error("expected tier path is not a directory: " + root.string());
+    }
+}
+
+inline void wait_for_mount(const fs::path& root, const std::string& name) {
+    for (int i = 0; i < 30; ++i) {
+        std::error_code ec;
+        if (fs::exists(root, ec) && !ec && is_mountpoint(root)) {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    throw std::runtime_error("timed out waiting for " + name + " tier mount: " + root.string());
+}
+
+inline std::string normalize_test_path(const std::string& path) {
+    fs::path p(path);
+    p = p.lexically_normal();
+    if (p.is_absolute()) {
+        p = p.lexically_relative("/");
+    }
+    return p.string();
+}
+
+inline std::vector<BlockLocation> sorted_locs(MetadataStore& metadata,
+                                              const std::string& path,
+                                              std::uint64_t offset,
+                                              std::uint64_t size) {
+    auto locs = metadata.lookup(normalize_test_path(path), offset, size);
+    std::sort(locs.begin(), locs.end(),
+              [](const BlockLocation& a, const BlockLocation& b) {
+                  return a.file_offset < b.file_offset;
+              });
+    return locs;
 }
 
 inline std::string to_string(const IoBuffer& buf) {

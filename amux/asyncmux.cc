@@ -1,4 +1,3 @@
-// asyncmux.cc
 #include "asyncmux.hh"
 
 #include <algorithm>
@@ -22,7 +21,7 @@ namespace asyncmux {
 
 namespace {
 
-uint64_t checked_end(uint64_t offset, uint64_t size) {
+std::uint64_t checked_end(std::uint64_t offset, std::uint64_t size) {
     return (size > UINT64_MAX - offset) ? UINT64_MAX : (offset + size);
 }
 
@@ -58,18 +57,27 @@ std::string fs_error_with_context(const char* what,
     return os.str();
 }
 
-} // namespace
+std::string normalize_path(const std::string& path) {
+    std::filesystem::path p(path);
+    p = p.lexically_normal();
+    if (p.is_absolute()) {
+        p = p.lexically_relative("/");
+    }
+    return p.string();
+}
+
+}  // namespace
 
 IoBuffer::IoBuffer() = default;
-IoBuffer::IoBuffer(size_t n) : data(n) {}
+IoBuffer::IoBuffer(std::size_t n) : data(n) {}
 IoBuffer::IoBuffer(std::vector<Byte> bytes) : data(std::move(bytes)) {}
 
-size_t IoBuffer::size() const { return data.size(); }
+std::size_t IoBuffer::size() const { return data.size(); }
 Byte* IoBuffer::bytes() { return data.data(); }
 const Byte* IoBuffer::bytes() const { return data.data(); }
 
 void TierRegistry::add(std::unique_ptr<Tier> tier) {
-    auto [_, inserted] = tiers_.emplace(tier->id(), std::move(tier));
+    auto [it, inserted] = tiers_.emplace(tier->id(), std::move(tier));
     if (!inserted) {
         throw IoError("duplicate tier id");
     }
@@ -103,11 +111,8 @@ FileSystemTier::FileSystemTier(TierId id,
     std::filesystem::create_directories(root_dir_, ec);
     if (ec) {
         throw IoError(fs_error_with_context("filesystem tier root setup failed",
-                                            root_dir_,
-                                            ec,
-                                            __FILE__,
-                                            __LINE__,
-                                            __func__));
+                                            root_dir_, ec,
+                                            __FILE__, __LINE__, __func__));
     }
 }
 
@@ -129,11 +134,8 @@ void FileSystemTier::ensure_parent_dirs(const std::filesystem::path& p) const {
         std::filesystem::create_directories(parent, ec);
         if (ec) {
             throw IoError(fs_error_with_context("write_at: failed to create parent directories",
-                                                parent,
-                                                ec,
-                                                __FILE__,
-                                                __LINE__,
-                                                __func__));
+                                                parent, ec,
+                                                __FILE__, __LINE__, __func__));
         }
     }
 }
@@ -149,15 +151,15 @@ std::shared_ptr<std::shared_mutex> FileSystemTier::lock_for_path(const std::file
 }
 
 cppcoro::task<IoBuffer> FileSystemTier::read_at(const std::string& relative_path,
-                                                uint64_t offset,
-                                                uint64_t size) {
+                                                std::uint64_t offset,
+                                                std::uint64_t size) {
     co_await pool_.schedule();
 
     const auto path = full_path(relative_path);
     const auto file_lock = lock_for_path(path);
     std::shared_lock<std::shared_mutex> lock(*file_lock);
 
-    std::vector<Byte> out(static_cast<size_t>(size), Byte{0});
+    std::vector<Byte> out(static_cast<std::size_t>(size), Byte{0});
 
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -165,47 +167,38 @@ cppcoro::task<IoBuffer> FileSystemTier::read_at(const std::string& relative_path
             co_return IoBuffer{std::move(out)};
         }
         throw IoError(io_error_with_context("read_at: failed to open file",
-                                            path,
-                                            errno ? errno : EIO,
-                                            __FILE__,
-                                            __LINE__,
-                                            __func__));
+                                            path, errno ? errno : EIO,
+                                            __FILE__, __LINE__, __func__));
     }
 
     in.seekg(0, std::ios::end);
     const auto end_pos = in.tellg();
     if (end_pos < 0) {
         throw IoError(io_error_with_context("read_at: failed to determine file size",
-                                            path,
-                                            errno ? errno : EIO,
-                                            __FILE__,
-                                            __LINE__,
-                                            __func__));
+                                            path, errno ? errno : EIO,
+                                            __FILE__, __LINE__, __func__));
     }
-    const auto file_size = static_cast<uint64_t>(end_pos);
 
+    const auto file_size = static_cast<std::uint64_t>(end_pos);
     if (offset >= file_size) {
         co_return IoBuffer{std::move(out)};
     }
 
-    const uint64_t readable = std::min<uint64_t>(size, file_size - offset);
+    const std::uint64_t readable = std::min<std::uint64_t>(size, file_size - offset);
     in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
     in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(readable));
 
     if (in.bad()) {
         throw IoError(io_error_with_context("read_at: failed during read",
-                                            path,
-                                            errno ? errno : EIO,
-                                            __FILE__,
-                                            __LINE__,
-                                            __func__));
+                                            path, errno ? errno : EIO,
+                                            __FILE__, __LINE__, __func__));
     }
 
     co_return IoBuffer{std::move(out)};
 }
 
 cppcoro::task<void> FileSystemTier::write_at(const std::string& relative_path,
-                                             uint64_t offset,
+                                             std::uint64_t offset,
                                              asyncmux::span<const Byte> data) {
     co_await pool_.schedule();
 
@@ -218,15 +211,12 @@ cppcoro::task<void> FileSystemTier::write_at(const std::string& relative_path,
     int fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0666);
     if (fd < 0) {
         throw IoError(io_error_with_context("write_at: failed to open file",
-                                            path,
-                                            errno,
-                                            __FILE__,
-                                            __LINE__,
-                                            __func__));
+                                            path, errno,
+                                            __FILE__, __LINE__, __func__));
     }
 
     const auto* ptr = reinterpret_cast<const unsigned char*>(data.data());
-    size_t remaining = data.size();
+    std::size_t remaining = data.size();
     off_t pos = static_cast<off_t>(offset);
 
     while (remaining > 0) {
@@ -235,32 +225,26 @@ cppcoro::task<void> FileSystemTier::write_at(const std::string& relative_path,
             const int saved_errno = errno;
             ::close(fd);
             throw IoError(io_error_with_context("write_at: failed during write",
-                                                path,
-                                                saved_errno,
-                                                __FILE__,
-                                                __LINE__,
-                                                __func__));
+                                                path, saved_errno,
+                                                __FILE__, __LINE__, __func__));
         }
-        ptr += static_cast<size_t>(written);
-        remaining -= static_cast<size_t>(written);
+        ptr += static_cast<std::size_t>(written);
+        remaining -= static_cast<std::size_t>(written);
         pos += written;
     }
 
     if (::close(fd) != 0) {
         throw IoError(io_error_with_context("write_at: close failed",
-                                            path,
-                                            errno,
-                                            __FILE__,
-                                            __LINE__,
-                                            __func__));
+                                            path, errno,
+                                            __FILE__, __LINE__, __func__));
     }
 
     co_return;
 }
 
 cppcoro::task<void> FileSystemTier::punch_hole(const std::string& relative_path,
-                                               uint64_t offset,
-                                               uint64_t size) {
+                                               std::uint64_t offset,
+                                               std::uint64_t size) {
     co_await pool_.schedule();
 
     if (size == 0) {
@@ -277,11 +261,8 @@ cppcoro::task<void> FileSystemTier::punch_hole(const std::string& relative_path,
             co_return;
         }
         throw IoError(io_error_with_context("punch_hole: failed to open file",
-                                            path,
-                                            errno,
-                                            __FILE__,
-                                            __LINE__,
-                                            __func__));
+                                            path, errno,
+                                            __FILE__, __LINE__, __func__));
     }
 
 #ifdef __linux__
@@ -293,22 +274,16 @@ cppcoro::task<void> FileSystemTier::punch_hole(const std::string& relative_path,
             const int saved_errno = errno;
             ::close(fd);
             throw IoError(io_error_with_context("punch_hole: fallocate failed",
-                                                path,
-                                                saved_errno,
-                                                __FILE__,
-                                                __LINE__,
-                                                __func__));
+                                                path, saved_errno,
+                                                __FILE__, __LINE__, __func__));
         }
     }
 #endif
 
     if (::close(fd) != 0) {
         throw IoError(io_error_with_context("punch_hole: close failed",
-                                            path,
-                                            errno,
-                                            __FILE__,
-                                            __LINE__,
-                                            __func__));
+                                            path, errno,
+                                            __FILE__, __LINE__, __func__));
     }
 
     co_return;
@@ -325,19 +300,16 @@ cppcoro::task<void> FileSystemTier::remove_file(const std::string& relative_path
     std::filesystem::remove(path, ec);
     if (ec) {
         throw IoError(fs_error_with_context("remove_file: failed to remove file",
-                                            path,
-                                            ec,
-                                            __FILE__,
-                                            __LINE__,
-                                            __func__));
+                                            path, ec,
+                                            __FILE__, __LINE__, __func__));
     }
 
     co_return;
 }
 
 std::vector<BlockLocation> MetadataStore::lookup(const std::string& path,
-                                                 uint64_t offset,
-                                                 uint64_t size) const {
+                                                 std::uint64_t offset,
+                                                 std::uint64_t size) const {
     std::shared_lock lock(mu_);
     auto it = file_map_.find(path);
     if (it == file_map_.end() || size == 0) {
@@ -345,19 +317,22 @@ std::vector<BlockLocation> MetadataStore::lookup(const std::string& path,
     }
 
     std::vector<BlockLocation> out;
-    const uint64_t end = checked_end(offset, size);
+    const std::uint64_t end = checked_end(offset, size);
+
     for (const auto& loc : it->second.extents) {
-        const uint64_t loc_begin = loc.file_offset;
-        const uint64_t loc_end = checked_end(loc.file_offset, loc.size);
+        const std::uint64_t loc_begin = loc.file_offset;
+        const std::uint64_t loc_end = checked_end(loc.file_offset, loc.size);
         if (loc_end <= offset || loc_begin >= end) {
             continue;
         }
         out.push_back(loc);
     }
 
-    std::sort(out.begin(), out.end(), [](const BlockLocation& a, const BlockLocation& b) {
-        return a.file_offset < b.file_offset;
-    });
+    std::sort(out.begin(), out.end(),
+              [](const BlockLocation& a, const BlockLocation& b) {
+                  return a.file_offset < b.file_offset;
+              });
+
     return out;
 }
 
@@ -383,23 +358,24 @@ void MetadataStore::rebuild_block_index_locked(const std::string& path) {
 void MetadataStore::update(const std::string& path,
                            BlockId block_id,
                            TierId tier_id,
-                           uint64_t file_offset,
-                           uint64_t size) {
+                           std::uint64_t file_offset,
+                           std::uint64_t size) {
     if (size == 0) {
         return;
     }
 
     std::unique_lock lock(mu_);
     auto& file = file_map_[path];
-    const uint64_t new_begin = file_offset;
-    const uint64_t new_end = checked_end(file_offset, size);
+
+    const std::uint64_t new_begin = file_offset;
+    const std::uint64_t new_end = checked_end(file_offset, size);
 
     std::vector<BlockLocation> next;
     next.reserve(file.extents.size() + 3);
 
     for (const auto& loc : file.extents) {
-        const uint64_t old_begin = loc.file_offset;
-        const uint64_t old_end = checked_end(loc.file_offset, loc.size);
+        const std::uint64_t old_begin = loc.file_offset;
+        const std::uint64_t old_end = checked_end(loc.file_offset, loc.size);
 
         if (old_end <= new_begin || old_begin >= new_end) {
             next.push_back(loc);
@@ -426,9 +402,11 @@ void MetadataStore::update(const std::string& path,
     }
 
     next.push_back(BlockLocation{block_id, tier_id, file_offset, size});
-    std::sort(next.begin(), next.end(), [](const BlockLocation& a, const BlockLocation& b) {
-        return a.file_offset < b.file_offset;
-    });
+
+    std::sort(next.begin(), next.end(),
+              [](const BlockLocation& a, const BlockLocation& b) {
+                  return a.file_offset < b.file_offset;
+              });
 
     file.extents = std::move(next);
     ++file.version;
@@ -437,6 +415,7 @@ void MetadataStore::update(const std::string& path,
 
 void MetadataStore::relocate_block(BlockId block_id, TierId new_tier) {
     std::unique_lock lock(mu_);
+
     auto idx = block_index_.find(block_id);
     if (idx == block_index_.end()) {
         throw IoError("unknown block in relocate_block()");
@@ -460,6 +439,7 @@ void MetadataStore::relocate_block(BlockId block_id, TierId new_tier) {
 
 LocatedBlock MetadataStore::get_block(BlockId block_id) const {
     std::shared_lock lock(mu_);
+
     auto idx = block_index_.find(block_id);
     if (idx == block_index_.end()) {
         throw IoError("unknown block in get_block()");
@@ -483,7 +463,7 @@ TierId MetadataStore::tier_of(BlockId block_id) const {
     return get_block(block_id).location.tier_id;
 }
 
-uint64_t MetadataStore::version_of(const std::string& path) const {
+std::uint64_t MetadataStore::version_of(const std::string& path) const {
     std::shared_lock lock(mu_);
     auto it = file_map_.find(path);
     if (it == file_map_.end()) {
@@ -492,7 +472,7 @@ uint64_t MetadataStore::version_of(const std::string& path) const {
     return it->second.version;
 }
 
-uint64_t MetadataStore::bump_version(const std::string& path) {
+std::uint64_t MetadataStore::bump_version(const std::string& path) {
     std::unique_lock lock(mu_);
     auto& file = file_map_[path];
     return ++file.version;
@@ -503,57 +483,6 @@ ConstantPlacementPolicy::ConstantPlacementPolicy(TierId default_tier)
 
 TierId ConstantPlacementPolicy::choose_tier(const WriteBlock&) {
     return default_tier_;
-}
-
-bool AsyncMux::PromotionQueue::push(BlockId block_id) {
-    bool wake = false;
-    {
-        std::lock_guard<std::mutex> guard(mu_);
-        if (stopping_) {
-            return false;
-        }
-
-        queue_.push(block_id);
-        wake = true;
-    }
-
-    if (wake) {
-        has_item_.set();
-    }
-
-    return true;
-}
-
-void AsyncMux::PromotionQueue::stop() noexcept {
-    bool wake = false;
-    {
-        std::lock_guard<std::mutex> guard(mu_);
-        stopping_ = true;
-        wake = true;
-    }
-
-    if (wake) {
-        has_item_.set();
-    }
-}
-
-cppcoro::task<std::optional<BlockId>> AsyncMux::PromotionQueue::pop() {
-    while (true) {
-        {
-            std::lock_guard<std::mutex> guard(mu_);
-            if (!queue_.empty()) {
-                BlockId block_id = queue_.front();
-                queue_.pop();
-                co_return block_id;
-            }
-
-            if (stopping_) {
-                co_return std::nullopt;
-            }
-        }
-
-        co_await has_item_;
-    }
 }
 
 AsyncMux::AsyncMux(TierRegistry& tiers,
@@ -569,24 +498,19 @@ AsyncMux::AsyncMux(TierRegistry& tiers,
       auto_migration_enabled_(auto_migration_enabled),
       hot_tier_id_(hot_tier_id) {
     if (auto_migration_enabled_) {
-        bg_scope_.spawn(background_loop());
+        bg_thread_ = std::thread([this] { background_worker_loop(); });
     }
 }
 
 AsyncMux::~AsyncMux() {
-    stopping_.store(true, std::memory_order_release);
-    promotion_queue_.stop();
-    cppcoro::sync_wait(bg_scope_.join());
-}
-
-bool AsyncMux::mark_promotion_queued(BlockId block_id) {
-    std::lock_guard<std::mutex> guard(promotion_dedup_mu_);
-    return queued_or_inflight_.insert(block_id).second;
-}
-
-void AsyncMux::clear_promotion_queued(BlockId block_id) {
-    std::lock_guard<std::mutex> guard(promotion_dedup_mu_);
-    queued_or_inflight_.erase(block_id);
+    {
+        std::lock_guard<std::mutex> guard(bg_mu_);
+        bg_stop_ = true;
+    }
+    bg_cv_.notify_all();
+    if (bg_thread_.joinable()) {
+        bg_thread_.join();
+    }
 }
 
 void AsyncMux::enqueue_background_promotion(BlockId block_id) {
@@ -594,64 +518,82 @@ void AsyncMux::enqueue_background_promotion(BlockId block_id) {
         return;
     }
 
-    if (!mark_promotion_queued(block_id)) {
+    std::lock_guard<std::mutex> guard(bg_mu_);
+    const auto [it, inserted] = bg_queued_.insert(block_id);
+    if (!inserted) {
         return;
     }
 
-    if (!promotion_queue_.push(block_id)) {
-        clear_promotion_queued(block_id);
-    }
+    bg_queue_.push(block_id);
+    bg_cv_.notify_one();
 }
 
-cppcoro::task<void> AsyncMux::background_loop() {
-    co_await pool_.schedule();
+void AsyncMux::background_worker_loop() {
+    while (true) {
+        BlockId block_id = 0;
 
-    while (!stopping_.load(std::memory_order_acquire)) {
-        auto block_id = co_await promotion_queue_.pop();
-        if (!block_id || stopping_.load(std::memory_order_acquire)) {
-            co_return;
+        {
+            std::unique_lock<std::mutex> lock(bg_mu_);
+            bg_cv_.wait(lock, [this] {
+                return bg_stop_ || !bg_queue_.empty();
+            });
+
+            if (bg_stop_ && bg_queue_.empty()) {
+                return;
+            }
+
+            block_id = bg_queue_.front();
+            bg_queue_.pop();
+            bg_queued_.erase(block_id);
         }
 
         try {
-            const TierId current = metadata_.tier_of(*block_id);
+            const TierId current = metadata_.tier_of(block_id);
             if (current != hot_tier_id_) {
-                co_await promote(*block_id, hot_tier_id_);
+                cppcoro::sync_wait(promote(block_id, hot_tier_id_));
             }
         } catch (...) {
-            // Best effort background promotion. Foreground requests remain authoritative.
+            // Best effort only.
         }
-
-        clear_promotion_queued(*block_id);
     }
 }
 
-cppcoro::task<IoBuffer> AsyncMux::read(const std::string& path,
-                                       uint64_t offset,
-                                       uint64_t size) {
+cppcoro::task<IoBuffer> AsyncMux::read(const std::string& raw_path,
+                                       std::uint64_t offset,
+                                       std::uint64_t size) {
     if (size == 0) {
         co_return IoBuffer{};
     }
 
+    const std::string path = normalize_path(raw_path);
     auto blocks = metadata_.lookup(path, offset, size);
+
     std::vector<cppcoro::task<IoBuffer>> tasks;
     std::vector<BlockLocation> overlaps;
     tasks.reserve(blocks.size());
     overlaps.reserve(blocks.size());
 
-    const uint64_t read_end = checked_end(offset, size);
+    const std::uint64_t read_end = checked_end(offset, size);
+
     for (const auto& b : blocks) {
-        const uint64_t block_end = checked_end(b.file_offset, b.size);
-        const uint64_t overlap_begin = std::max<uint64_t>(b.file_offset, offset);
-        const uint64_t overlap_end = std::min<uint64_t>(block_end, read_end);
+        const std::uint64_t block_end = checked_end(b.file_offset, b.size);
+        const std::uint64_t overlap_begin = std::max<std::uint64_t>(b.file_offset, offset);
+        const std::uint64_t overlap_end = std::min<std::uint64_t>(block_end, read_end);
+
         if (overlap_begin >= overlap_end) {
             continue;
         }
 
-        const uint64_t overlap_size = overlap_end - overlap_begin;
-        const uint64_t tier_offset = overlap_begin;
+        const std::uint64_t overlap_size = overlap_end - overlap_begin;
         Tier& tier = tiers_.get(b.tier_id);
-        tasks.emplace_back(tier.read_at(path, tier_offset, overlap_size));
-        overlaps.push_back(BlockLocation{b.block_id, b.tier_id, overlap_begin, overlap_size});
+
+        tasks.emplace_back(tier.read_at(path, overlap_begin, overlap_size));
+        overlaps.push_back(BlockLocation{
+            b.block_id,
+            b.tier_id,
+            overlap_begin,
+            overlap_size,
+        });
 
         if (b.tier_id != hot_tier_id_) {
             enqueue_background_promotion(b.block_id);
@@ -662,30 +604,34 @@ cppcoro::task<IoBuffer> AsyncMux::read(const std::string& path,
     co_return assemble(overlaps, std::move(results), offset, size);
 }
 
-cppcoro::task<void> AsyncMux::write(const std::string& path,
-                                    uint64_t offset,
+cppcoro::task<void> AsyncMux::write(const std::string& raw_path,
+                                    std::uint64_t offset,
                                     asyncmux::span<const Byte> data) {
     if (data.empty()) {
         co_return;
     }
 
+    const std::string path = normalize_path(raw_path);
     auto blocks = split(offset, data);
+
     std::vector<PreparedWrite> prepared;
     prepared.reserve(blocks.size());
 
     for (auto& block : blocks) {
-        const TierId chosen_tier = placement_.choose_tier(block);
+        TierId chosen_tier = placement_.choose_tier(block);
         prepared.push_back(PreparedWrite{std::move(block), chosen_tier});
     }
 
     std::vector<cppcoro::task<void>> tasks;
     tasks.reserve(prepared.size());
+
     for (const auto& item : prepared) {
         Tier& tier = tiers_.get(item.tier_id);
-        tasks.emplace_back(tier.write_at(
-            path,
-            item.block.file_offset,
-            asyncmux::span<const Byte>(item.block.data.data(), item.block.data.size())));
+        tasks.emplace_back(
+            tier.write_at(path,
+                          item.block.file_offset,
+                          asyncmux::span<const Byte>(item.block.data.data(),
+                                                     item.block.data.size())));
     }
 
     co_await cppcoro::when_all(std::move(tasks));
@@ -708,18 +654,24 @@ cppcoro::task<void> AsyncMux::migrate(BlockId block_id, TierId src_id, TierId ds
         const LocatedBlock located = metadata_.get_block(block_id);
         const auto& old = located.location;
 
+        if (old.tier_id == dst_id) {
+            co_return;
+        }
+
         if (old.tier_id != src_id) {
             throw IoError("migrate: source tier does not match metadata");
         }
 
-        const uint64_t start_version = metadata_.version_of(located.path);
+        const std::uint64_t start_version = metadata_.version_of(located.path);
+
         Tier& src_tier = tiers_.get(src_id);
         Tier& dst_tier = tiers_.get(dst_id);
 
         auto data = co_await src_tier.read_at(located.path, old.file_offset, old.size);
         co_await dst_tier.write_at(located.path,
                                    old.file_offset,
-                                   asyncmux::span<const Byte>(data.data.data(), data.data.size()));
+                                   asyncmux::span<const Byte>(data.data.data(),
+                                                              data.data.size()));
 
         if (metadata_.version_of(located.path) != start_version) {
             continue;
@@ -730,7 +682,7 @@ cppcoro::task<void> AsyncMux::migrate(BlockId block_id, TierId src_id, TierId ds
         try {
             co_await src_tier.punch_hole(located.path, old.file_offset, old.size);
         } catch (...) {
-            // Metadata has already switched; punch_hole is best effort cleanup.
+            // Best effort cleanup only.
         }
 
         co_return;
@@ -744,27 +696,30 @@ cppcoro::task<void> AsyncMux::promote(BlockId block_id, TierId hot_tier) {
     if (current == hot_tier) {
         co_return;
     }
+
     co_await migrate(block_id, current, hot_tier);
 }
 
-std::vector<WriteBlock> AsyncMux::split(uint64_t offset, asyncmux::span<const Byte> data) {
+std::vector<WriteBlock> AsyncMux::split(std::uint64_t offset,
+                                        asyncmux::span<const Byte> data) {
     std::vector<WriteBlock> out;
-    size_t cursor = 0;
+    std::size_t cursor = 0;
 
     while (cursor < data.size()) {
-        const uint64_t absolute = offset + cursor;
-        const size_t in_block = static_cast<size_t>(absolute % kBlockSize);
-        const size_t space_left = kBlockSize - in_block;
-        const size_t n = std::min<size_t>(space_left, data.size() - cursor);
+        const std::uint64_t absolute = offset + cursor;
+        const std::size_t in_block = static_cast<std::size_t>(absolute % kBlockSize);
+        const std::size_t space_left = kBlockSize - in_block;
+        const std::size_t n = std::min<std::size_t>(space_left, data.size() - cursor);
 
         std::vector<Byte> chunk(n);
         std::copy_n(data.begin() + static_cast<std::ptrdiff_t>(cursor), n, chunk.begin());
 
         out.push_back(WriteBlock{
-            .block_id = allocator_.next(),
-            .file_offset = absolute,
-            .data = std::move(chunk),
+            allocator_.next(),
+            absolute,
+            std::move(chunk),
         });
+
         cursor += n;
     }
 
@@ -773,21 +728,26 @@ std::vector<WriteBlock> AsyncMux::split(uint64_t offset, asyncmux::span<const By
 
 IoBuffer AsyncMux::assemble(const std::vector<BlockLocation>& locations,
                             std::vector<IoBuffer> pieces,
-                            uint64_t read_offset,
-                            uint64_t read_size) {
-    IoBuffer out(static_cast<size_t>(read_size));
+                            std::uint64_t read_offset,
+                            std::uint64_t read_size) {
+    IoBuffer out(static_cast<std::size_t>(read_size));
 
-    for (size_t i = 0; i < locations.size(); ++i) {
+    for (std::size_t i = 0; i < locations.size(); ++i) {
         const auto& loc = locations[i];
         const auto& src = pieces[i].data;
 
-        const size_t dst_offset = static_cast<size_t>(loc.file_offset - read_offset);
-        const size_t n = std::min(static_cast<size_t>(loc.size), src.size());
+        const std::size_t dst_offset =
+            static_cast<std::size_t>(loc.file_offset - read_offset);
+        const std::size_t n = std::min<std::size_t>(
+            static_cast<std::size_t>(loc.size), src.size());
+
         if (dst_offset > out.data.size() || n > out.data.size() - dst_offset) {
             throw IoError("assemble: invalid extent bounds");
         }
 
-        std::copy_n(src.begin(), n, out.data.begin() + static_cast<std::ptrdiff_t>(dst_offset));
+        std::copy_n(src.begin(),
+                    n,
+                    out.data.begin() + static_cast<std::ptrdiff_t>(dst_offset));
     }
 
     return out;
@@ -796,16 +756,16 @@ IoBuffer AsyncMux::assemble(const std::vector<BlockLocation>& locations,
 FuseFrontend::FuseFrontend(AsyncMux& mux) : mux_(mux) {}
 
 cppcoro::task<IoBuffer> FuseFrontend::on_read(const std::string& path,
-                                              uint64_t offset,
-                                              uint64_t size) {
+                                              std::uint64_t offset,
+                                              std::uint64_t size) {
     co_return co_await mux_.read(path, offset, size);
 }
 
 cppcoro::task<void> FuseFrontend::on_write(const std::string& path,
-                                           uint64_t offset,
+                                           std::uint64_t offset,
                                            asyncmux::span<const Byte> data) {
     co_await mux_.write(path, offset, data);
     co_return;
 }
 
-} // namespace asyncmux
+}  // namespace asyncmux

@@ -18,7 +18,6 @@
 #include <vector>
 
 #include <sys/stat.h>
-#include <sys/statfs.h>
 #include <unistd.h>
 
 #include "amux/asyncmux.hh"
@@ -43,8 +42,6 @@ using cppcoro::static_thread_pool;
 using cppcoro::sync_wait;
 using cppcoro::task;
 
-namespace fs = std::filesystem;
-
 namespace {
 
 static_assert(
@@ -54,69 +51,6 @@ static_assert(
     false,
 #endif
     "multiple_fs.cc requires Linux");
-
-const fs::path kHotRoot  = "/tier0/tmpfs";
-const fs::path kWarmRoot = "/tier1/data";
-const fs::path kColdRoot = "/tier2/data";
-
-constexpr long kTmpfsMagic = 0x01021994;
-constexpr long kExtMagic   = 0xEF53;
-constexpr long kXfsMagic   = 0x58465342;
-
-long fs_magic_for(const fs::path& root) {
-    struct statfs stat_info {};
-    if (statfs(root.c_str(), &stat_info) != 0) {
-        throw std::runtime_error("statfs failed for " + root.string());
-    }
-    return static_cast<long>(stat_info.f_type);
-}
-
-bool is_mountpoint(const fs::path& root) {
-    std::error_code ec;
-    if (!fs::exists(root, ec) || ec) {
-        return false;
-    }
-
-    struct stat root_stat {};
-    struct stat parent_stat {};
-
-    if (::stat(root.c_str(), &root_stat) != 0) {
-        return false;
-    }
-
-    const fs::path parent = root.parent_path();
-    if (parent.empty()) {
-        return true;
-    }
-
-    if (::stat(parent.c_str(), &parent_stat) != 0) {
-        return false;
-    }
-
-    return (root_stat.st_dev != parent_stat.st_dev) ||
-           (root_stat.st_ino == parent_stat.st_ino);
-}
-
-void ensure_dir_exists(const fs::path& root) {
-    std::error_code ec;
-    if (!fs::exists(root, ec) || ec) {
-        throw std::runtime_error("expected tier path does not exist: " + root.string());
-    }
-    if (!fs::is_directory(root, ec) || ec) {
-        throw std::runtime_error("expected tier path is not a directory: " + root.string());
-    }
-}
-
-void wait_for_mount(const fs::path& root, const std::string& name) {
-    for (int i = 0; i < 30; ++i) {
-        std::error_code ec;
-        if (fs::exists(root, ec) && !ec && is_mountpoint(root)) {
-            return;
-        }
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
-    throw std::runtime_error("timed out waiting for " + name + " tier mount: " + root.string());
-}
 
 void ensure_tier_ready(const fs::path& root, const std::string& name) {
     ensure_dir_exists(root);
@@ -139,18 +73,6 @@ void ensure_tier_ready(const fs::path& root, const std::string& name) {
     }
 }
 
-std::vector<BlockLocation> sorted_locs(MetadataStore& metadata,
-                                       const std::string& path,
-                                       std::uint64_t offset,
-                                       std::uint64_t size) {
-    auto locs = metadata.lookup(path, offset, size);
-    std::sort(locs.begin(), locs.end(),
-              [](const BlockLocation& a, const BlockLocation& b) {
-                  return a.file_offset < b.file_offset;
-              });
-    return locs;
-}
-
 void assert_non_overlapping(const std::vector<BlockLocation>& locs,
                             const std::string& context) {
     for (std::size_t i = 1; i < locs.size(); ++i) {
@@ -163,7 +85,15 @@ void assert_non_overlapping(const std::vector<BlockLocation>& locs,
 void cleanup_test_artifacts() {
     std::error_code ec;
     fs::remove(kHotRoot / "hot_file", ec);
+    fs::remove(kWarmRoot / "hot_file", ec);
+    fs::remove(kColdRoot / "hot_file", ec);
+
+    fs::remove(kHotRoot / "warm_file", ec);
     fs::remove(kWarmRoot / "warm_file", ec);
+    fs::remove(kColdRoot / "warm_file", ec);
+
+    fs::remove(kHotRoot / "cold_file", ec);
+    fs::remove(kWarmRoot / "cold_file", ec);
     fs::remove(kColdRoot / "cold_file", ec);
 
     fs::remove(kHotRoot / "fanout", ec);
@@ -173,6 +103,10 @@ void cleanup_test_artifacts() {
     fs::remove(kHotRoot / "promote", ec);
     fs::remove(kWarmRoot / "promote", ec);
     fs::remove(kColdRoot / "promote", ec);
+
+    fs::remove(kHotRoot / "bg_promote", ec);
+    fs::remove(kWarmRoot / "bg_promote", ec);
+    fs::remove(kColdRoot / "bg_promote", ec);
 
     fs::remove(kHotRoot / "overwrite", ec);
     fs::remove(kWarmRoot / "overwrite", ec);
@@ -187,6 +121,19 @@ void cleanup_test_artifacts() {
     fs::remove_all(kColdRoot / "group", ec);
 }
 
+bool wait_until(std::function<bool()> pred,
+                std::chrono::milliseconds timeout = std::chrono::milliseconds(3000),
+                std::chrono::milliseconds poll = std::chrono::milliseconds(10)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
+            return true;
+        }
+        std::this_thread::sleep_for(poll);
+    }
+    return pred();
+}
+
 struct Fixture {
     static_thread_pool pool{8};
     TierRegistry tiers;
@@ -195,7 +142,7 @@ struct Fixture {
     AsyncMux mux;
 
     Fixture()
-        : mux(tiers, metadata, placement, pool, false) {
+        : mux(tiers, metadata, placement, pool, true, 1) {
         wait_for_mount(kHotRoot, "hot");
         wait_for_mount(kWarmRoot, "warm");
         wait_for_mount(kColdRoot, "cold");
@@ -336,6 +283,48 @@ task<void> test_promote_restores_hot_tier(Fixture& fx) {
               "promote should preserve bytes after moving blocks back to hot tier");
 }
 
+task<void> test_background_read_triggers_promotion(Fixture& fx) {
+    std::string payload((2 * kBlockSize) + 321, 'm');
+    for (int i = 0; i < 26; ++i) {
+        payload[64 + i] = static_cast<char>('A' + i);
+        payload[kBlockSize + 64 + i] = static_cast<char>('a' + i);
+    }
+
+    auto bytes = to_bytes(payload);
+    co_await fx.mux.write("/bg_promote", 0,
+                          asyncmux::span<const Byte>(bytes.data(), bytes.size()));
+
+    auto locs = sorted_locs(fx.metadata, "/bg_promote", 0, bytes.size());
+    assert_true(locs.size() >= 2, "bg_promote should span multiple blocks");
+
+    for (const auto& loc : locs) {
+        co_await fx.mux.migrate(loc.block_id, 1, 2);
+        assert_true(fx.metadata.tier_of(loc.block_id) == 2,
+                    "setup should move blocks to warm tier");
+    }
+
+    IoBuffer out = co_await fx.mux.read("/bg_promote", 0, bytes.size());
+    assert_eq(to_string(out), payload,
+              "read should still return correct bytes before background promotion completes");
+
+    const bool promoted = wait_until([&]() {
+        auto now = sorted_locs(fx.metadata, "/bg_promote", 0, bytes.size());
+        return std::all_of(now.begin(), now.end(), [](const BlockLocation& loc) {
+            return loc.tier_id == 1;
+        });
+    });
+
+    assert_true(promoted,
+                "background promotion should eventually move read blocks back to hot tier");
+
+    auto final_locs = sorted_locs(fx.metadata, "/bg_promote", 0, bytes.size());
+    for (const auto& loc : final_locs) {
+        assert_true(loc.tier_id == 1, "all blocks should be promoted to hot tier");
+    }
+
+    co_return;
+}
+
 task<void> test_multiple_paths_across_tiers(Fixture& fx) {
     fx.placement.set(1);
     auto one = to_bytes("one-hot");
@@ -454,6 +443,7 @@ task<void> run_all(Fixture& fx) {
     co_await test_placement_targets_expected_tier(fx);
     co_await test_multi_tier_fanout_read(fx);
     co_await test_promote_restores_hot_tier(fx);
+    co_await test_background_read_triggers_promotion(fx);
     co_await test_multiple_paths_across_tiers(fx);
     co_await test_missing_file_zero_fill(fx);
     co_await test_overwrite_replaces_old_extents(fx);
