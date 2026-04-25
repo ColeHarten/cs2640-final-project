@@ -42,6 +42,3 @@
 
 # Build directory
 build/
-
-# Figures directory
-data_analysis/figs/
