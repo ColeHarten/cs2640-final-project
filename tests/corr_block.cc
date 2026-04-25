@@ -22,7 +22,7 @@
 #include <unistd.h>
 
 #include "../bmux/blockmux.hh"
-#include "tests/utils.hh"
+#include "utils.hh"
 
 using bmux::BlockingMux;
 using bmux::BlockLocation;
@@ -43,7 +43,7 @@ static_assert(
 #else
     false,
 #endif
-    "corr_block.cc requires Linux");
+    __FILE__ " requires Linux");
 
 std::string normalize_test_path(const std::string& path) {
     fs::path p(path);

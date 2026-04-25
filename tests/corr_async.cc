@@ -21,8 +21,7 @@
 #include <unistd.h>
 
 #include "amux/asyncmux.hh"
-#include "tests/utils.hh"
-#include "../span.hh"
+#include "utils.hh"
 
 #include <cppcoro/static_thread_pool.hpp>
 #include <cppcoro/sync_wait.hpp>

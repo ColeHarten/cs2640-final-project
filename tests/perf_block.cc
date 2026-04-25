@@ -27,10 +27,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "../span.hh"
-
 #include "../bmux/blockmux.hh"
-#include "tests/utils.hh"
+#include "utils.hh"
 
 using bmux::BlockingMux;
 using bmux::BlockLocation;
