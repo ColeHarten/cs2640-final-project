@@ -7,7 +7,7 @@ OUT_DIR="${ROOT_DIR}/data_analysis/raw"
 ASYNC_BIN="${ROOT_DIR}/../build/benchmark_async"
 BLOCK_BIN="${ROOT_DIR}/../build/benchmark_block"
 
-OPS=100
+OPS=10000
 THREADS=8
 CONCURRENCY=16
 SEED=1
